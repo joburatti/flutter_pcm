@@ -1,6 +1,6 @@
 import 'package:flutter/services.dart';
 
-enum SampleFormat { float32, uint8, uint16 }
+enum SampleFormat { float32, float64, uint8, uint16, uint32 }
 
 class AudioFormat {
   final int frequency;
@@ -35,10 +35,6 @@ class FlutterPcm {
       res["channels"],
       SampleFormat.values.byName(res["sampleFormat"]),
     );
-  }
-
-  static Future<void> teardown() async {
-    return _methodChannel.invokeMethod<void>('teardown');
   }
 
   static void setVolume(double volume) {

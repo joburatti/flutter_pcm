@@ -67,9 +67,6 @@ void FlutterPcmPlugin::HandleMethodCall(const FlutterCall &method_call,
       result->Error(setup_res.error());
     }
     break;
-  case hash("teardown"):
-    result->Success(FlutterValue());
-    break;
   case hash("setPlaying"): {
     auto p = std::get<bool>(*method_call.arguments());
     pcm_player_.set_play_state(p ? PcmPlayer::kPlaying : PcmPlayer::kPaused);

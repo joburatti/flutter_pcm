@@ -22,3 +22,10 @@ flutter:
     platforms:
       windows:
         pluginClass: FlutterPcmPluginCApi
+      ios:
+        pluginClass: FlutterPcmPlugin
+        sharedDarwinSource: true
+      macos:
+        pluginClass: FlutterPcmPlugin
+        sharedDarwinSource: true
+

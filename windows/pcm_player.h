@@ -19,7 +19,7 @@ using ByteVectorPtr = std::unique_ptr<std::vector<uint8_t>>;
 using SampleCallback = std::function<std::future<ByteVectorPtr>(uint32_t)>;
 using VolumeCallback = std::function<void(float)>;
 
-enum SampleFormat { unknown, float32, uint8, uint16 };
+enum SampleFormat { unknown, float32, float64, uint8, uint16, uint32 };
 
 struct AudioFormat {
   uint32_t frequency;
