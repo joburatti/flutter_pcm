@@ -153,10 +153,12 @@ SampleFormat get_sample_format(const uint32_t format_tag,
   switch (format_tag) {
   case WAVE_FORMAT_PCM:
     switch (bits_per_sample) {
-    case 1:
+    case 8:
       return uint8;
-    case 2:
+    case 16:
       return uint16;
+    case 32:
+      return uint32;
     }
     break;
   case WAVE_FORMAT_IEEE_FLOAT:
@@ -328,7 +330,7 @@ void PcmPlayer::ThreadMainLoop(IAudioClient *audio_client,
     }
   }
 
-  if (apply_volume_) {
+  if (apply_volume_.exchange(false)) {
     audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
   }
 

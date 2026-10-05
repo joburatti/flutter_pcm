@@ -35,6 +35,8 @@ enum SampleFormat: String {
 
 public class FlutterPcmPlugin: NSObject, FlutterPlugin {
     var audioUnit: AUAudioUnit! = nil
+    var audioRunning = false
+    var interruptionObserver: NSObjectProtocol? = nil
     let channel: FlutterMethodChannel
 
     public static func register(with registrar: FlutterPluginRegistrar) {
@@ -51,6 +53,10 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
     }
 
     deinit {
+        if let observer = interruptionObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
         if audioUnit != nil {
             audioUnit.stopHardware()
             audioUnit.deallocateRenderResources()
@@ -58,7 +64,7 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
         }
 
         #if os(iOS)
-            AVAudioSession.sharedInstance().setActive(false)
+            try? AVAudioSession.sharedInstance().setActive(false)
         #endif
     }
 
@@ -91,14 +97,19 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
 
                 let audioSession = AVAudioSession.sharedInstance()
                 // This will enable lock screen / silent mode playback. Other possible values would be Ambient or SoloAmbient
-                audioSession.setCategory(AVAudioSessionCategoryPlayback)
+                try audioSession.setCategory(.playback)
 
-                NotificationCenter.default.addObserver(
-                    forName: NSNotification.Name.AVAudioSessionInterruption,
-                    object: nil,
-                    queue: nil,
-                    using: audioSessionInterruptionHandler
-                )
+                // Capture self weakly, otherwise the observer keeps the plugin
+                // alive and deinit never runs.
+                interruptionObserver = NotificationCenter.default.addObserver(
+                    forName: AVAudioSession.interruptionNotification,
+                    object: audioSession,
+                    queue: nil
+                ) { [weak self] notification in
+                    self?.audioSessionInterruptionHandler(
+                        notification: notification
+                    )
+                }
 
                 try audioSession.setActive(true)
             #endif
@@ -124,6 +135,7 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
             audioUnit.isOutputEnabled = true
             try audioUnit.allocateRenderResources()
             try audioUnit.startHardware()
+            audioRunning = true
 
             return result
         } catch let error as NSError {
@@ -159,19 +171,19 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
     #if os(iOS)
         private func audioSessionInterruptionHandler(notification: Notification)
         {
-            let interuptionDict = notification.userInfo
-            if let interuptionType = interuptionDict?[
-                AVAudioSessionInterruptionTypeKey
-            ] {
-                let interuptionVal = AVAudioSessionInterruptionType(
-                    rawValue: (interuptionType as AnyObject).uintValue
+            guard
+                let rawType = notification.userInfo?[
+                    AVAudioSessionInterruptionTypeKey
+                ] as? UInt,
+                let interruptionType = AVAudioSession.InterruptionType(
+                    rawValue: rawType
                 )
-                if interuptionVal == AVAudioSessionInterruptionType.began {
-                    if audioRunning {
-                        audioUnit.stopHardware()
-                        audioRunning = false
-                    }
-                }
+            else {
+                return
+            }
+            if interruptionType == .began && audioRunning {
+                audioUnit.stopHardware()
+                audioRunning = false
             }
         }
     #endif

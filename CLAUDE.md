@@ -14,7 +14,7 @@ Platform status:
 
 ## Commands
 
-This machine is Linux with the Flutter SDK (`~/flutter`, linked into `~/.local/bin`), so Linux builds and tests run here. Windows and Darwin builds need their own hosts.
+This machine is Linux with the Flutter SDK (`~/flurp/flutter`, linked into `~/.local/bin`), so Linux builds and tests run here. Windows and Darwin builds need their own hosts.
 
 ```sh
 flutter pub get                       # in repo root and/or example/
@@ -85,16 +85,11 @@ Remaining work:
 - Make `fillSpeakerBuffer` work. The render callback is real-time, while channel calls must be dispatched to the main thread and are asynchronous. It cannot block on Dart, so it needs something like a ring buffer that a main-thread or worker producer fills by calling `getSamples`.
 - Implement play/pause, volume, and `onVolumeChanged`.
 
-Known compile problems in the iOS branch:
-- `audioRunning` is never declared.
-- `setCategory` is missing `try`.
-- It uses old Swift AVAudioSession names (`AVAudioSessionCategoryPlayback`, `AVAudioSessionInterruption*`).
-- The interruption observer is never removed.
+The iOS branch has never been compiled (there is no Swift toolchain on this machine). The interruption observer captures `self` weakly and is removed in `deinit`. However, `outputProvider = fillSpeakerBuffer` still captures `self` strongly, so `deinit` does not run while the audio unit exists.
 
-The podspec links `CoreAudio`, with deployment targets iOS 12 and macOS 10.11.
+The podspec links `CoreAudio`, with deployment targets iOS 15 and macOS 12, matching the current Flutter templates.
 
 ## Known issues / gotchas
-- The integration test calls `FlutterPcm.teardown()`, which does not exist in the Dart API. Windows tears down only when the plugin is destroyed.
-- `get_sample_format` in `pcm_player.cpp` compares `wBitsPerSample` with `1`/`2` (byte counts) for `WAVE_FORMAT_PCM`. Integer PCM mix formats therefore come back as `unknown`. In practice the Windows mix format is almost always float32.
-- The example's `_sampleCallback` assumes 2 channels and float32 and ignores the format returned by `setup`.
-- In `ThreadMainLoop`, `apply_volume_` is never reset after `SetMasterVolume`, so the volume is applied again on every loop iteration.
+- There is no `teardown` in the Dart API. Native players are torn down only when the plugin is destroyed.
+- Despite the names, `uint16`/`uint32` are **signed** integer PCM on every backend. Only `uint8` is unsigned (offset 128). On Windows, 24-bit integer mix formats come back as `unknown`.
+- `plugin_platform_interface` is a dependency but unused.

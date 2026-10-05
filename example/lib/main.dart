@@ -20,17 +20,45 @@ class _MyAppState extends State<MyApp> {
   AudioFormat? _audioFormat;
   bool _playing = false;
   double _volume = 1.0;
-  int _sample_offset = 0;
+  int _sampleOffset = 0;
 
-  Uint8List _sampleCallback(int maxSamples) {
-    // Assume 2 channels and float32 format
-    final samples = List<double>.generate(
-      2 * maxSamples,
-      (int i) => sin((_sample_offset + i ~/ 2) / 30),
-      growable: false,
-    );
-    _sample_offset += maxSamples;
-    return Float32List.fromList(samples).buffer.asUint8List();
+  Uint8List _sampleCallback(int maxFrames) {
+    final format = _audioFormat;
+    if (format == null) {
+      return Uint8List(0);
+    }
+
+    // uint8 is unsigned, but uint16 and uint32 are signed on every backend.
+    final (
+      int bytes,
+      void Function(ByteData, int, double) write,
+    ) = switch (format.sampleFormat) {
+      SampleFormat.float32 => (4, (d, o, v) => d.setFloat32(o, v, Endian.host)),
+      SampleFormat.float64 => (8, (d, o, v) => d.setFloat64(o, v, Endian.host)),
+      SampleFormat.uint8 => (
+        1,
+        (d, o, v) => d.setUint8(o, (128 + v * 127).round()),
+      ),
+      SampleFormat.uint16 => (
+        2,
+        (d, o, v) => d.setInt16(o, (v * 32767).round(), Endian.host),
+      ),
+      SampleFormat.uint32 => (
+        4,
+        (d, o, v) => d.setInt32(o, (v * 2147483647).round(), Endian.host),
+      ),
+    };
+
+    final channels = format.channels;
+    final data = ByteData(maxFrames * channels * bytes);
+    for (int frame = 0; frame < maxFrames; frame++) {
+      final v = sin((_sampleOffset + frame) / 30);
+      for (int c = 0; c < channels; c++) {
+        write(data, (frame * channels + c) * bytes, v);
+      }
+    }
+    _sampleOffset += maxFrames;
+    return data.buffer.asUint8List();
   }
 
   void _togglePlaying() {
