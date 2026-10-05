@@ -33,7 +33,7 @@ The example app has `windows/` and `linux/` runners. To try the Darwin code, fir
 ## Architecture
 
 ### Dart API: `lib/flutter_pcm.dart`
-The whole public API is the static class `FlutterPcm`, which talks over one `MethodChannel('flutter_pcm')`. There is no `plugin_platform_interface` split, even though that package is listed as a dependency.
+The whole public API is the static class `FlutterPcm`, which talks over one `MethodChannel('flutter_pcm')`.
 
 Dart → native calls:
 - `setup` returns `{frequency, channels, sampleFormat}`. `sampleFormat` is the string name of a `SampleFormat` enum value.
@@ -85,11 +85,10 @@ Remaining work:
 - Make `fillSpeakerBuffer` work. The render callback is real-time, while channel calls must be dispatched to the main thread and are asynchronous. It cannot block on Dart, so it needs something like a ring buffer that a main-thread or worker producer fills by calling `getSamples`.
 - Implement play/pause, volume, and `onVolumeChanged`.
 
-The iOS branch has never been compiled (there is no Swift toolchain on this machine). The interruption observer captures `self` weakly and is removed in `deinit`. However, `outputProvider = fillSpeakerBuffer` still captures `self` strongly, so `deinit` does not run while the audio unit exists.
+The iOS branch has never been compiled (there is no Swift toolchain on this machine). `outputProvider = fillSpeakerBuffer` captures `self` strongly, so `deinit` does not run while the audio unit exists.
 
-The podspec links `CoreAudio`, with deployment targets iOS 15 and macOS 12, matching the current Flutter templates.
+The podspec links `CoreAudio`, with deployment targets iOS 15 and macOS 12.
 
 ## Known issues / gotchas
 - There is no `teardown` in the Dart API. Native players are torn down only when the plugin is destroyed.
 - Despite the names, `uint16`/`uint32` are **signed** integer PCM on every backend. Only `uint8` is unsigned (offset 128). On Windows, 24-bit integer mix formats come back as `unknown`.
-- `plugin_platform_interface` is a dependency but unused.
