@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter:*)",
+      "Bash(dart:*)",
+      "Bash(cmake:*)",
+      "Bash(pactl:*)",
+      "Bash(pw-cli:*)"
+    ]
+  }
+}
