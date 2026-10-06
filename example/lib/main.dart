@@ -81,12 +81,19 @@ class _MyAppState extends State<MyApp> {
     });
   }
 
+  void _onPcmPlayingChanged(bool playing) {
+    setState(() {
+      _playing = playing;
+    });
+  }
+
   @override
   void initState() {
     super.initState();
     FlutterPcm.setup(
       _sampleCallback,
       volumeCallback: _onPcmSessionVolumeChanged,
+      playingCallback: _onPcmPlayingChanged,
     ).then((result) async {
       final v = await FlutterPcm.getVolume();
       setState(() {

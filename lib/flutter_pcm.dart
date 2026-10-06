@@ -13,17 +13,25 @@ class AudioFormat {
 typedef SampleCallback = Uint8List Function(int maxSamples);
 typedef VolumeCallback = void Function(double volume);
 
+/// Reports playback that the system paused or resumed on its own (Android
+/// audio focus changes, headphones unplugged), and a [FlutterPcm.setPlaying]
+/// call that was refused.
+typedef PlayingCallback = void Function(bool playing);
+
 class FlutterPcm {
   static final _methodChannel = _createChannel();
   static SampleCallback? _sampleCallback;
   static VolumeCallback? _volumeCallback;
+  static PlayingCallback? _playingCallback;
 
   static Future<AudioFormat?> setup(
     SampleCallback sampleCallback, {
     VolumeCallback? volumeCallback,
+    PlayingCallback? playingCallback,
   }) async {
     _sampleCallback = sampleCallback;
     _volumeCallback = volumeCallback;
+    _playingCallback = playingCallback;
     final res = await _methodChannel.invokeMapMethod<String, dynamic>('setup');
 
     if (res == null) {
@@ -57,6 +65,10 @@ class FlutterPcm {
       case "onVolumeChanged":
         if (_volumeCallback != null) {
           _volumeCallback!(call.arguments);
+        }
+      case "onPlayingChanged":
+        if (_playingCallback != null) {
+          _playingCallback!(call.arguments);
         }
       default:
         throw MissingPluginException();
