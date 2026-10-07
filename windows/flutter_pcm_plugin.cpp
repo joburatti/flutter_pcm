@@ -27,16 +27,19 @@ constexpr uint64_t operator"" _hash(const char *str, size_t len) {
 }
 
 FlutterPcmPlugin::FlutterPcmPlugin(flutter::PluginRegistrarWindows *registrar)
-    : channel_(registrar->messenger(), "flutter_pcm",
+    : registrar_(registrar),
+      channel_(registrar->messenger(), "flutter_pcm",
                &flutter::StandardMethodCodec::GetInstance()),
-      pcm_player_([this](auto n) { return CallSampleCallback(n); },
-                  [this](auto f) { CallVolumeCallback(f); }),
+      pcm_player_(
+          [this](auto n) { CallSampleCallback(n); },
+          [this](auto f) { CallVolumeCallback(f); },
+          [this](auto p) { CallPlayingCallback(p); }),
       active_window_(nullptr) {
   channel_.SetMethodCallHandler([this](const auto &call, auto result) {
     HandleMethodCall(call, std::move(result));
   });
 
-  registrar->RegisterTopLevelWindowProcDelegate(
+  window_proc_id_ = registrar->RegisterTopLevelWindowProcDelegate(
       [this](HWND h, UINT msg, WPARAM w, LPARAM l) -> std::optional<LRESULT> {
         switch (msg) {
         case WM_PROCESS_INVOCATIONS:
@@ -48,7 +51,11 @@ FlutterPcmPlugin::FlutterPcmPlugin(flutter::PluginRegistrarWindows *registrar)
       });
 }
 
-FlutterPcmPlugin::~FlutterPcmPlugin() {}
+FlutterPcmPlugin::~FlutterPcmPlugin() {
+  // Messages posted while pcm_player_ is torn down must not reach this
+  // object
+  registrar_->UnregisterTopLevelWindowProcDelegate(window_proc_id_);
+}
 
 void FlutterPcmPlugin::HandleMethodCall(const FlutterCall &method_call,
                                         std::unique_ptr<FlutterResult> result) {
@@ -87,38 +94,43 @@ void FlutterPcmPlugin::HandleMethodCall(const FlutterCall &method_call,
   }
 }
 
-std::future<std::unique_ptr<std::vector<uint8_t>>>
-FlutterPcmPlugin::CallSampleCallback(uint32_t max_samples) {
-  auto promise =
-      std::make_shared<std::promise<std::unique_ptr<std::vector<uint8_t>>>>();
+void FlutterPcmPlugin::CallSampleCallback(uint32_t max_samples) {
+  // Replies run on the platform thread, like the destructor, so checking
+  // the token is enough to know the plugin still exists
+  auto deliver = [this, alive = std::weak_ptr<int>(alive_)](
+                     ByteVectorPtr samples) {
+    if (!alive.expired()) {
+      pcm_player_.OnSamples(std::move(samples));
+    }
+  };
 
   const std::lock_guard<std::mutex> lock(invocation_mutex_);
   invocation_queue_.emplace_back(FlutterMethodInvocation(
       {"getSamples", std::make_unique<FlutterValue>(max_samples),
        std::make_unique<flutter::MethodResultFunctions<>>(
-           [promise](auto result) {
-             // move:ing result to the new list looks iffy but works here as
-             // result is about to be destroyed anyway
-             promise->set_value(std::make_unique<std::vector<uint8_t>>(
-                 std::get<std::vector<uint8_t>>(std::move(*result))));
+           [deliver](const FlutterValue *result) {
+             auto bytes =
+                 result ? std::get_if<std::vector<uint8_t>>(result) : nullptr;
+             deliver(bytes ? std::make_unique<std::vector<uint8_t>>(*bytes)
+                           : nullptr);
            },
-           [promise](auto ec, auto em, auto ed) {
-             promise->set_exception(
-                 std::make_exception_ptr(std::runtime_error("")));
-           },
-           [promise]() {
-             promise->set_exception(
-                 std::make_exception_ptr(std::runtime_error("")));
-           })}));
+           [deliver](auto ec, auto em, auto ed) { deliver(nullptr); },
+           [deliver]() { deliver(nullptr); })}));
 
   PostMessage(active_window_, WM_PROCESS_INVOCATIONS, 0, 0);
-  return promise->get_future();
 }
 
 void FlutterPcmPlugin::CallVolumeCallback(float volume) {
   const std::lock_guard<std::mutex> lock(invocation_mutex_);
   invocation_queue_.emplace_back(FlutterMethodInvocation{
       "onVolumeChanged", std::make_unique<FlutterValue>(volume)});
+  PostMessage(active_window_, WM_PROCESS_INVOCATIONS, 0, 0);
+}
+
+void FlutterPcmPlugin::CallPlayingCallback(bool playing) {
+  const std::lock_guard<std::mutex> lock(invocation_mutex_);
+  invocation_queue_.emplace_back(FlutterMethodInvocation{
+      "onPlayingChanged", std::make_unique<FlutterValue>(playing)});
   PostMessage(active_window_, WM_PROCESS_INVOCATIONS, 0, 0);
 }
 

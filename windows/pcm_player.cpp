@@ -2,8 +2,11 @@
 
 #include <audioclient.h>
 #include <audiopolicy.h>
+#include <algorithm>
 #include <chrono>
+#include <format>
 #include <initguid.h>
+#include <optional>
 #include <mmdeviceapi.h>
 #include <windows.h>
 
@@ -24,22 +27,24 @@ const GUID AUDIO_CLIENT_GUID = {0x01020304, 0x0506, 0x0708, 0x09, 0x0a, 0x0b,
 #define REFTIMES_PER_SEC 10000000
 #define REFTIMES_PER_MILLISEC 10000
 
-// todo: set error message in some way
-#define CHECK_RESULT(name)                                                     \
-  if (FAILED(hr)) {                                                            \
-    return;                                                                    \
-  }
+#define HRESULT_ERROR(name)                                                    \
+  std::unexpected(                                                             \
+      std::format("Error calling {}: {:#010x}", name, (uint32_t)hr))
 
+// The device can't be used anymore, typically AUDCLNT_E_DEVICE_INVALIDATED
 #define CHECK_RESULT_MAIN_LOOP(name)                                           \
   if (FAILED(hr)) {                                                            \
-    play_state_ = kExiting;                                                    \
-    return;                                                                    \
+    return false;                                                              \
+  }
+
+#define CHECK_RESULT_SETUP(name)                                               \
+  if (FAILED(hr)) {                                                            \
+    return HRESULT_ERROR(name);                                                \
   }
 
 #define CHECK_RESULT_PROMISE(name)                                             \
   if (FAILED(hr)) {                                                            \
-    promise.set_value(                                                         \
-        std::unexpected(std::format("Error calling {}: {}", name, hr)));       \
+    promise.set_value(HRESULT_ERROR(name));                                    \
     return;                                                                    \
   }
 
@@ -52,10 +57,13 @@ namespace flutter_pcm {
 class AudioSessionEvents : public IAudioSessionEvents {
   std::atomic<ULONG> ref_count_;
   const std::function<void(float)> on_volume_change_;
+  const std::function<void()> on_disconnect_;
 
 public:
-  AudioSessionEvents(const std::function<void(float)> &vc)
-      : ref_count_(1), on_volume_change_(vc) {}
+  AudioSessionEvents(const std::function<void(float)> &volume_change,
+                     const std::function<void()> &disconnect)
+      : ref_count_(1), on_volume_change_(volume_change),
+        on_disconnect_(disconnect) {}
 
   ~AudioSessionEvents() {}
 
@@ -122,6 +130,9 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   OnSessionDisconnected(AudioSessionDisconnectReason disconnectReason) {
+    // The device was removed, the audio service stopped, or similar. The
+    // stream is unusable either way.
+    on_disconnect_();
     return S_OK;
   }
 };
@@ -168,33 +179,74 @@ SampleFormat get_sample_format(const uint32_t format_tag,
   return unknown;
 }
 
-template <typename T> auto com_ptr() {
-  auto dstr = [](T *ptr) { ptr->Release(); };
-  return std::unique_ptr<T, decltype(dstr)>(nullptr, dstr);
-}
+struct ComRelease {
+  void operator()(IUnknown *p) const { p->Release(); }
+};
+template <typename T> using ComPtr = std::unique_ptr<T, ComRelease>;
+
+// The objects belonging to one opening of the device. Lives on the audio
+// thread, between CoInitializeEx and CoUninitialize.
+struct PcmPlayer::Device {
+  ComPtr<IAudioSessionEvents> events;
+  ComPtr<IAudioSessionControl> session_control;
+  ComPtr<IAudioClient> audio_client;
+  ComPtr<IAudioRenderClient> render_client;
+  ComPtr<ISimpleAudioVolume> audio_volume;
+  uint32_t buffer_frame_count = 0;
+  uint32_t sample_rate = 0;
+  uint32_t frame_size = 0;
+
+  ~Device() {
+    if (audio_client) {
+      // These fail if the device is gone, which doesn't matter here
+      audio_client->Stop();
+      audio_client->Reset();
+    }
+    if (session_control && events) {
+      session_control->UnregisterAudioSessionNotification(events.get());
+    }
+  }
+};
 
 PcmPlayer::PcmPlayer(SampleCallback sample_callback,
-                     VolumeCallback volume_callback)
-    : play_state_(kPaused), sample_callback_(sample_callback),
-      volume_callback_(volume_callback), volume_(0), apply_volume_(false) {}
+                     VolumeCallback volume_callback,
+                     PlayingCallback playing_callback)
+    : play_state_(kPaused), volume_(0), apply_volume_(false),
+      sample_callback_(std::move(sample_callback)),
+      volume_callback_(std::move(volume_callback)),
+      playing_callback_(std::move(playing_callback)) {}
 
 PcmPlayer::~PcmPlayer() { Teardown(); }
 
-std::expected<AudioFormat, std::string> flutter_pcm::PcmPlayer::Setup() {
-  if (audio_thread_.joinable()) {
+SetupResult PcmPlayer::Setup() {
+  if (set_up_) {
     return std::unexpected("Setup has already been called");
   }
 
+  // The audio thread opens the device and reports the result
   std::promise<SetupResult> promise;
   auto future = promise.get_future();
   audio_thread_ =
       std::thread(&PcmPlayer::ThreadRunner, this, std::move(promise));
 
-  return future.get();
+  auto result = future.get();
+  if (!result) {
+    audio_thread_.join();
+  }
+  set_up_ = result.has_value();
+  if (set_up_) {
+    auto pwfx = reinterpret_cast<const WAVEFORMATEX *>(wave_format_.data());
+    frame_size_ = pwfx->nBlockAlign;
+  }
+  return result;
 }
 
 std::expected<std::monostate, std::string> PcmPlayer::Teardown() {
-  set_play_state(kExiting);
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    play_state_ = kExiting;
+    cv_.notify_all();
+  }
   if (audio_thread_.joinable()) {
     audio_thread_.join();
   }
@@ -202,7 +254,24 @@ std::expected<std::monostate, std::string> PcmPlayer::Teardown() {
   return {};
 }
 
+// Called on the audio thread after the device failed, or reopening it did.
+// Pauses until the next set_play_state(kPlaying).
+void PcmPlayer::PauseAfterFailure() {
+  bool was_playing;
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    was_playing = play_state_ == kPlaying;
+    if (was_playing) {
+      play_state_ = kPaused;
+    }
+  }
+  if (was_playing) {
+    playing_callback_(false);
+  }
+}
+
 void PcmPlayer::set_play_state(PlayState s) {
+  // Without a device, the audio thread reopens it when woken up to play
   const std::lock_guard<std::mutex> lock(mutex_);
   play_state_ = s;
   cv_.notify_all();
@@ -215,180 +284,273 @@ void PcmPlayer::set_volume(float v) {
   cv_.notify_all();
 }
 
+// Exits when tearing down, or when opening the device failed during setup
+// (reported through the promise). When the device fails later, pauses and
+// waits to reopen it, see PauseAfterFailure.
 void PcmPlayer::ThreadRunner(std::promise<SetupResult> promise) {
   HRESULT hr = CoInitializeEx(0, 0);
   CHECK_RESULT_PROMISE("CoInitializeEx");
 
-  auto enumerator = com_ptr<IMMDeviceEnumerator>();
-  hr = CoCreateInstance(CLSID_MMDeviceEnumerator, NULL, CLSCTX_INPROC_SERVER,
-                        IID_IMMDeviceEnumerator, std::out_ptr(enumerator));
-  CHECK_RESULT_PROMISE("CoCreateInstance");
+  {
+    // Empty while closed after a failure
+    std::optional<Device> device;
+    device.emplace();
+    auto result = OpenDevice(*device);
+    const bool opened = result.has_value();
+    if (!opened) {
+      device.reset();
+    }
+    promise.set_value(std::move(result));
 
-  auto device = com_ptr<IMMDevice>();
+    while (opened && play_state_ != kExiting) {
+      if (device) {
+        if (!ThreadMainLoop(*device)) {
+          device.reset();
+          PauseAfterFailure();
+        }
+        continue;
+      }
+
+      {
+        // Woken by set_play_state
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return play_state_ != kPaused; });
+      }
+      if (play_state_ == kExiting) {
+        break;
+      }
+
+      // Open the current default endpoint with the format reported by Setup
+      device.emplace();
+      if (auto reopened = OpenDevice(*device); !reopened) {
+        device.reset();
+        OutputDebugStringA(
+            std::format("flutter_pcm: reopening the device failed: {}\n",
+                        reopened.error())
+                .c_str());
+        PauseAfterFailure();
+      }
+    }
+  }
+  CoUninitialize();
+}
+
+SetupResult PcmPlayer::OpenDevice(Device &device) {
+  // Set up already, so this is reopening the device after a failure
+  const bool reopening = !wave_format_.empty();
+
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    session_disconnected_ = false;
+  }
+
+  ComPtr<IMMDeviceEnumerator> enumerator;
+  HRESULT hr =
+      CoCreateInstance(CLSID_MMDeviceEnumerator, NULL, CLSCTX_INPROC_SERVER,
+                       IID_IMMDeviceEnumerator, std::out_ptr(enumerator));
+  CHECK_RESULT_SETUP("CoCreateInstance");
+
+  ComPtr<IMMDevice> endpoint;
   hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia,
-                                           std::out_ptr(device));
-  CHECK_RESULT_PROMISE("GetDefaultAudioEndpoint");
+                                           std::out_ptr(endpoint));
+  CHECK_RESULT_SETUP("GetDefaultAudioEndpoint");
 
-  auto audio_session_manager = com_ptr<IAudioSessionManager>();
-  hr = device->Activate(IID_IAudioSessionManager, CLSCTX_INPROC_SERVER, NULL,
-                        (void **)&audio_session_manager);
-  CHECK_RESULT_PROMISE("Activate AudioSessionManager");
+  ComPtr<IAudioSessionManager> audio_session_manager;
+  hr = endpoint->Activate(IID_IAudioSessionManager, CLSCTX_INPROC_SERVER, NULL,
+                          std::out_ptr(audio_session_manager));
+  CHECK_RESULT_SETUP("Activate AudioSessionManager");
 
-  auto events = com_ptr<IAudioSessionEvents>();
-  events.reset(new AudioSessionEvents([this](float v) {
-    volume_ = v;
-    volume_callback_(v);
-  }));
+  device.events.reset(new AudioSessionEvents(
+      [this](float v) {
+        volume_ = v;
+        volume_callback_(v);
+      },
+      [this] {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        session_disconnected_ = true;
+        cv_.notify_all();
+      }));
 
-  auto release_session_control = [e = events.get()](IAudioSessionControl *asc) {
-    asc->UnregisterAudioSessionNotification(e);
-    asc->Release();
-  };
-  auto audio_session_control =
-      std::unique_ptr<IAudioSessionControl, decltype(release_session_control)>(
-          nullptr, release_session_control);
   hr = audio_session_manager->GetAudioSessionControl(
-      &AUDIO_CLIENT_GUID, 0, std::out_ptr(audio_session_control));
-  CHECK_RESULT_PROMISE("GetAudioSessionControl");
+      &AUDIO_CLIENT_GUID, 0, std::out_ptr(device.session_control));
+  CHECK_RESULT_SETUP("GetAudioSessionControl");
 
-  hr = audio_session_control->RegisterAudioSessionNotification(events.get());
-  CHECK_RESULT_PROMISE("RegisterAudioSessionNotification");
+  hr = device.session_control->RegisterAudioSessionNotification(
+      device.events.get());
+  CHECK_RESULT_SETUP("RegisterAudioSessionNotification");
 
-  auto audio_client = com_ptr<IAudioClient>();
-  hr = device->Activate(IID_IAudioClient, CLSCTX_INPROC_SERVER, NULL,
-                        (void **)&audio_client);
-  CHECK_RESULT_PROMISE("Activate AudioClient");
+  hr = endpoint->Activate(IID_IAudioClient, CLSCTX_INPROC_SERVER, NULL,
+                          std::out_ptr(device.audio_client));
+  CHECK_RESULT_SETUP("Activate AudioClient");
 
-  auto pwfx = std::unique_ptr<WAVEFORMATEX, decltype(&CoTaskMemFree)>(
-      nullptr, CoTaskMemFree);
-  hr = audio_client->GetMixFormat(std::out_ptr(pwfx));
-  CHECK_RESULT_PROMISE("GetMixFormat");
+  // Use the device's mix format, unless reopening: Dart keeps producing the
+  // format reported by Setup, which the new device may not share
+  std::vector<uint8_t> wave_format = wave_format_;
+  if (!reopening) {
+    auto mix_format = std::unique_ptr<WAVEFORMATEX, decltype(&CoTaskMemFree)>(
+        nullptr, CoTaskMemFree);
+    hr = device.audio_client->GetMixFormat(std::out_ptr(mix_format));
+    CHECK_RESULT_SETUP("GetMixFormat");
 
-  const auto format_tag = GetFormatTag(pwfx.get());
+    auto bytes = reinterpret_cast<const uint8_t *>(mix_format.get());
+    wave_format.assign(bytes,
+                       bytes + sizeof(WAVEFORMATEX) + mix_format->cbSize);
+  }
+  auto pwfx = reinterpret_cast<const WAVEFORMATEX *>(wave_format.data());
+
+  const auto format_tag = GetFormatTag(pwfx);
   const auto format = get_sample_format(format_tag, pwfx->wBitsPerSample);
   if (format == unknown) {
-    promise.set_value(
-        std::unexpected(std::format("Unknown format tag {}", format_tag)));
-    return;
+    return std::unexpected(std::format("Unknown format tag {}", format_tag));
   }
 
   // The requested period here will be the minimum buffer length the driver
   // uses. If we request too short a buffer, the driver will make it longer.
   // We fill half of this buffer at a time. Go with 100ms for now.
-  hr = audio_client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0,
-                                REFTIMES_PER_SEC / 10, 0, pwfx.get(),
-                                &AUDIO_CLIENT_GUID);
-  CHECK_RESULT_PROMISE("Initialize");
+  // Windows converts the format if it isn't the mix format, which can
+  // happen when reopening.
+  hr = device.audio_client->Initialize(
+      AUDCLNT_SHAREMODE_SHARED,
+      AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+          AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+      REFTIMES_PER_SEC / 10, 0, pwfx, &AUDIO_CLIENT_GUID);
+  CHECK_RESULT_SETUP("Initialize");
 
-  uint32_t buffer_frame_count;
-  hr = audio_client->GetBufferSize(&buffer_frame_count);
-  CHECK_RESULT_PROMISE("GetBufferSize");
+  hr = device.audio_client->GetBufferSize(&device.buffer_frame_count);
+  CHECK_RESULT_SETUP("GetBufferSize");
 
-  const auto buffer_duration =
-      1000ms * buffer_frame_count / pwfx->nSamplesPerSec;
+  hr = device.audio_client->GetService(IID_IAudioRenderClient,
+                                       std::out_ptr(device.render_client));
+  CHECK_RESULT_SETUP("GetService AudioRenderClient");
 
-  auto render_client = com_ptr<IAudioRenderClient>();
-  hr =
-      audio_client->GetService(IID_IAudioRenderClient, (void **)&render_client);
-  CHECK_RESULT_PROMISE("GetService AudioRenderClient");
+  hr = device.audio_client->GetService(IID_ISimpleAudioVolume,
+                                       std::out_ptr(device.audio_volume));
+  CHECK_RESULT_SETUP("GetService SimpleAudioVolume");
 
-  auto audio_volume = com_ptr<ISimpleAudioVolume>();
-  hr = audio_client->GetService(IID_ISimpleAudioVolume, (void **)&audio_volume);
-  CHECK_RESULT_PROMISE("GetService SimpleAudioVolume");
-
-  float v = 0;
-  audio_volume->GetMasterVolume(&v);
-  volume_ = v;
-
-  hr = audio_client->Start();
-  CHECK_RESULT_PROMISE("Start");
-
-  // Done initializing
-  promise.set_value(AudioFormat{pwfx->nSamplesPerSec, pwfx->nChannels, format});
-
-  while (play_state_ != kExiting) {
-    ThreadMainLoop(audio_client.get(), render_client.get(), audio_volume.get(),
-                   buffer_frame_count, pwfx.get());
+  if (reopening) {
+    // The session on the new device has its own volume
+    device.audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
+  } else {
+    float v = 0;
+    device.audio_volume->GetMasterVolume(&v);
+    volume_ = v;
   }
 
-  hr = audio_client->Stop();
-  CHECK_RESULT("Stop");
+  hr = device.audio_client->Start();
+  CHECK_RESULT_SETUP("Start");
 
-  hr = audio_client->Reset();
-  CHECK_RESULT("Reset");
+  device.sample_rate = pwfx->nSamplesPerSec;
+  device.frame_size = pwfx->nBlockAlign;
+  const AudioFormat audio_format{pwfx->nSamplesPerSec, pwfx->nChannels, format};
+  if (!reopening) {
+    wave_format_ = std::move(wave_format);
+  }
+  return audio_format;
 }
 
-void PcmPlayer::ThreadMainLoop(IAudioClient *audio_client,
-                               IAudioRenderClient *render_client,
-                               ISimpleAudioVolume *audio_volume,
-                               uint32_t buffer_frame_count,
-                               WAVEFORMATEX *pwfx) {
-  if (play_state_ == kPaused) {
+// Returns false if the device has failed
+bool PcmPlayer::ThreadMainLoop(Device &device) {
+  {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (play_state_ == kPaused) {
+    if (play_state_ == kPaused && !apply_volume_ && !session_disconnected_) {
       cv_.wait(lock);
+    }
+    if (session_disconnected_) {
+      return false;
     }
   }
 
   if (apply_volume_.exchange(false)) {
-    audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
+    device.audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
   }
 
-  if (play_state_ == kPlaying) {
-    uint32_t num_frames_padding;
-    HRESULT hr = audio_client->GetCurrentPadding(&num_frames_padding);
-    CHECK_RESULT_MAIN_LOOP("GetCurrentPadding");
-
-    // Should we wait a bit before filling the buffer?
-    if (num_frames_padding > 3 * buffer_frame_count / 5) {
-      // Wait until half the buffer is available
-      uint32_t sleep_frames = num_frames_padding - buffer_frame_count / 2;
-      auto sleep_duration = 1000ms * sleep_frames / pwfx->nSamplesPerSec;
-
-      std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait_for(lock, sleep_duration);
-
-      // Did the user pause while we were waiting?
-      if (play_state_ != kPlaying) {
-        return;
-      }
-
-      // Get the new number of available frames after waiting
-      hr = audio_client->GetCurrentPadding(&num_frames_padding);
-      CHECK_RESULT_MAIN_LOOP("GetCurrentPadding2");
-    }
-
-    try {
-      uint32_t frame_size_bytes = pwfx->wBitsPerSample * pwfx->nChannels / 8;
-      uint32_t num_frames_available = buffer_frame_count - num_frames_padding;
-      auto samples_future = sample_callback_(num_frames_available);
-
-      std::future_status samples_status;
-      do {
-        samples_status = samples_future.wait_for(100ms);
-      } while (play_state_ == kPlaying &&
-               samples_status != std::future_status::ready);
-
-      if (samples_status != std::future_status::ready) {
-        return;
-      }
-
-      auto samples = samples_future.get();
-      uint32_t frame_count = (uint32_t)min(num_frames_available,
-                                           samples->size() / frame_size_bytes);
-
-      uint8_t *buffer;
-      hr = render_client->GetBuffer(frame_count, &buffer);
-      CHECK_RESULT_MAIN_LOOP("GetBuffer");
-
-      std::copy_n(samples->begin(), frame_count * frame_size_bytes, buffer);
-
-      hr = render_client->ReleaseBuffer(frame_count, 0);
-      CHECK_RESULT_MAIN_LOOP("ReleaseBuffer2");
-    } catch (std::runtime_error const &) {
-      return;
-    }
+  if (play_state_ != kPlaying) {
+    return true;
   }
+
+  const uint32_t buffer_frame_count = device.buffer_frame_count;
+  uint32_t num_frames_padding;
+  HRESULT hr = device.audio_client->GetCurrentPadding(&num_frames_padding);
+  CHECK_RESULT_MAIN_LOOP("GetCurrentPadding");
+
+  // Below, waits are cut short by play state and volume changes, replies and
+  // disconnects; the next round then looks again
+  std::unique_lock<std::mutex> lock(mutex_);
+
+  if (samples_) {
+    // Fits, since nothing has been written since the request. Only a
+    // reopened device may have a smaller buffer; the rest is dropped then.
+    const uint32_t frame_count = (uint32_t)std::min<size_t>(
+        buffer_frame_count - num_frames_padding,
+        samples_->size() / device.frame_size);
+
+    uint8_t *buffer;
+    hr = device.render_client->GetBuffer(frame_count, &buffer);
+    CHECK_RESULT_MAIN_LOOP("GetBuffer");
+
+    std::copy_n(samples_->data(), frame_count * device.frame_size, buffer);
+
+    hr = device.render_client->ReleaseBuffer(frame_count, 0);
+    CHECK_RESULT_MAIN_LOOP("ReleaseBuffer");
+    samples_.reset();
+    return true;
+  }
+
+  // Wait until about half the buffer is free
+  if (num_frames_padding > 3 * buffer_frame_count / 5) {
+    uint32_t sleep_frames = num_frames_padding - buffer_frame_count / 2;
+    cv_.wait_for(lock, 1000ms * sleep_frames / device.sample_rate);
+    return true;
+  }
+
+  const uint32_t num_frames_available = buffer_frame_count - num_frames_padding;
+
+  if (request_pending_) {
+    cv_.wait(lock, [this] {
+      return !request_pending_ || play_state_ != kPlaying || apply_volume_ ||
+             session_disconnected_;
+    });
+    return true;
+  }
+
+  if (delay_request_) {
+    // The last reply had nothing usable. Don't hammer the Dart side.
+    delay_request_ = false;
+    cv_.wait_for(lock,
+                 1000ms * buffer_frame_count / 2 / device.sample_rate);
+    return true;
+  }
+
+  request_pending_ = true;
+  requested_frames_ = num_frames_available;
+  lock.unlock();
+  sample_callback_(num_frames_available);
+  return true;
+}
+
+// Runs on the platform thread with the reply to the outstanding request, or
+// nullptr if it failed
+void PcmPlayer::OnSamples(ByteVectorPtr samples) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  if (!request_pending_) {
+    return;
+  }
+  request_pending_ = false;
+
+  // Only whole frames, and no more than requested
+  if (samples) {
+    const size_t bytes = std::min<size_t>(
+        samples->size(), (size_t)requested_frames_ * frame_size_);
+    samples->resize(bytes - bytes % frame_size_);
+  }
+  if (play_state_ != kPlaying) {
+    // Dropped, see the class comment
+  } else if (samples && !samples->empty()) {
+    samples_ = std::move(samples);
+  } else {
+    delay_request_ = true;
+  }
+  cv_.notify_all();
 }
 
 } // namespace flutter_pcm

@@ -5,7 +5,6 @@
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
 
-#include <future>
 #include <memory>
 #include <vector>
 
@@ -32,10 +31,13 @@ public:
   void HandleMethodCall(const FlutterCall &method_call,
                         std::unique_ptr<FlutterResult> result);
 
-  std::future<ByteVectorPtr> CallSampleCallback(uint32_t max_samples);
+  void CallSampleCallback(uint32_t max_samples);
   void CallVolumeCallback(float volume);
+  void CallPlayingCallback(bool playing);
 
 private:
+  flutter::PluginRegistrarWindows *registrar_;
+  int window_proc_id_;
   flutter::MethodChannel<FlutterValue> channel_;
   HWND active_window_;
 
@@ -44,6 +46,9 @@ private:
   void ProcessMethodInvocations();
 
   PcmPlayer pcm_player_;
+
+  // Expires when the plugin is destroyed
+  std::shared_ptr<int> alive_ = std::make_shared<int>();
 };
 
 } // namespace flutter_pcm

@@ -7,7 +7,6 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import java.util.concurrent.CompletableFuture
 
 class FlutterPcmPlugin : FlutterPlugin, MethodCallHandler {
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -75,30 +74,24 @@ class FlutterPcmPlugin : FlutterPlugin, MethodCallHandler {
     }
 
     // Called on the audio thread. Channel calls must happen on the main
-    // thread, so post the request there and let the Dart reply fulfill the
-    // future.
-    private fun callSampleCallback(maxFrames: Int): CompletableFuture<ByteArray?> {
-        val future = CompletableFuture<ByteArray?>()
+    // thread, so post the request there. The reply goes to the player, unless
+    // the plugin was detached meanwhile.
+    private fun callSampleCallback(maxFrames: Int) {
         mainHandler.post {
-            val channel = channel
-            if (channel == null) {
-                future.complete(null)
-                return@post
-            }
+            val channel = channel ?: return@post
             channel.invokeMethod("getSamples", maxFrames, object : Result {
                 override fun success(result: Any?) {
-                    future.complete(result as? ByteArray)
+                    player?.onSamples(result as? ByteArray)
                 }
 
                 override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                    future.complete(null)
+                    player?.onSamples(null)
                 }
 
                 override fun notImplemented() {
-                    future.complete(null)
+                    player?.onSamples(null)
                 }
             })
         }
-        return future
     }
 }

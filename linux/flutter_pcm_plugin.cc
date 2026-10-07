@@ -27,12 +27,12 @@ using flutter_pcm::ByteVectorPtr;
 // volume changes are requested from the audio threads. These structs carry an
 // invocation over to the main thread through an idle source.
 
+// Holds a ref on the plugin, so the reply can be handed to its player
 struct SampleRequest {
-  FlMethodChannel *channel;
+  FlutterPcmPlugin *plugin;
   uint32_t max_frames;
-  std::promise<ByteVectorPtr> promise;
 
-  ~SampleRequest() { g_object_unref(channel); }
+  ~SampleRequest() { g_object_unref(plugin); }
 };
 
 struct VolumeNotification {
@@ -40,6 +40,13 @@ struct VolumeNotification {
   double volume;
 
   ~VolumeNotification() { g_object_unref(channel); }
+};
+
+struct PlayingNotification {
+  FlMethodChannel *channel;
+  bool playing;
+
+  ~PlayingNotification() { g_object_unref(channel); }
 };
 
 void sample_response_cb(GObject *object, GAsyncResult *result,
@@ -53,20 +60,27 @@ void sample_response_cb(GObject *object, GAsyncResult *result,
   FlValue *value =
       response ? fl_method_response_get_result(response, &error) : nullptr;
 
+  ByteVectorPtr samples;
   if (value && fl_value_get_type(value) == FL_VALUE_TYPE_UINT8_LIST) {
     const uint8_t *data = fl_value_get_uint8_list(value);
-    request->promise.set_value(std::make_unique<std::vector<uint8_t>>(
-        data, data + fl_value_get_length(value)));
-  } else {
-    request->promise.set_exception(std::make_exception_ptr(std::runtime_error(
-        error ? error->message : "getSamples did not return a Uint8List")));
+    samples = std::make_unique<std::vector<uint8_t>>(
+        data, data + fl_value_get_length(value));
+  }
+
+  // The player is gone if the plugin was disposed meanwhile
+  if (request->plugin->pcm_player) {
+    request->plugin->pcm_player->OnSamples(std::move(samples));
   }
 }
 
 gboolean send_sample_request(gpointer user_data) {
   auto request = static_cast<SampleRequest *>(user_data);
+  if (!request->plugin->channel) {
+    delete request;
+    return G_SOURCE_REMOVE;
+  }
   g_autoptr(FlValue) args = fl_value_new_int(request->max_frames);
-  fl_method_channel_invoke_method(request->channel, "getSamples", args,
+  fl_method_channel_invoke_method(request->plugin->channel, "getSamples", args,
                                   nullptr, sample_response_cb, request);
   return G_SOURCE_REMOVE;
 }
@@ -80,19 +94,33 @@ gboolean send_volume_notification(gpointer user_data) {
   return G_SOURCE_REMOVE;
 }
 
-std::future<ByteVectorPtr> call_sample_callback(FlMethodChannel *channel,
-                                                uint32_t max_frames) {
-  auto request = new SampleRequest{
-      FL_METHOD_CHANNEL(g_object_ref(channel)), max_frames, {}};
-  auto future = request->promise.get_future();
+gboolean send_playing_notification(gpointer user_data) {
+  std::unique_ptr<PlayingNotification> notification(
+      static_cast<PlayingNotification *>(user_data));
+  g_autoptr(FlValue) args = fl_value_new_bool(notification->playing);
+  fl_method_channel_invoke_method(notification->channel, "onPlayingChanged",
+                                  args, nullptr, nullptr, nullptr);
+  return G_SOURCE_REMOVE;
+}
+
+
+void call_sample_callback(FlutterPcmPlugin *plugin, uint32_t max_frames) {
+  auto request =
+      new SampleRequest{FLUTTER_PCM_PLUGIN(g_object_ref(plugin)), max_frames};
   g_idle_add_full(G_PRIORITY_DEFAULT, send_sample_request, request, nullptr);
-  return future;
 }
 
 void call_volume_callback(FlMethodChannel *channel, float volume) {
   auto notification =
       new VolumeNotification{FL_METHOD_CHANNEL(g_object_ref(channel)), volume};
   g_idle_add_full(G_PRIORITY_DEFAULT, send_volume_notification, notification,
+                  nullptr);
+}
+
+void call_playing_callback(FlMethodChannel *channel, bool playing) {
+  auto notification = new PlayingNotification{
+      FL_METHOD_CHANNEL(g_object_ref(channel)), playing};
+  g_idle_add_full(G_PRIORITY_DEFAULT, send_playing_notification, notification,
                   nullptr);
 }
 
@@ -204,8 +232,9 @@ void flutter_pcm_plugin_register_with_registrar(FlPluginRegistrar *registrar) {
   FlMethodChannel *channel = plugin->channel;
   plugin->pcm_player = new flutter_pcm::PcmPlayer(
       app_name,
-      [channel](uint32_t n) { return call_sample_callback(channel, n); },
-      [channel](float v) { call_volume_callback(channel, v); });
+      [plugin](uint32_t n) { call_sample_callback(plugin, n); },
+      [channel](float v) { call_volume_callback(channel, v); },
+      [channel](bool p) { call_playing_callback(channel, p); });
 
   g_object_unref(plugin);
 }

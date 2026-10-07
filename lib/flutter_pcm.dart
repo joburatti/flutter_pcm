@@ -13,9 +13,15 @@ class AudioFormat {
 typedef SampleCallback = Uint8List Function(int maxSamples);
 typedef VolumeCallback = void Function(double volume);
 
-/// Reports playback that the system paused or resumed on its own (Android
-/// audio focus changes, headphones unplugged), and a [FlutterPcm.setPlaying]
-/// call that was refused.
+/// Reports playback that the system paused or resumed on its own, and a
+/// [FlutterPcm.setPlaying] call that was refused.
+///
+/// On every platform, playback pauses when the audio device or server fails
+/// (for example the output device was unplugged on Windows, or the sound
+/// server restarted on Linux). The next `setPlaying(true)` reopens it with
+/// the format returned by [FlutterPcm.setup], so the sample callback can
+/// keep producing that format. On Android, audio focus changes and unplugged
+/// headphones also pause, and a transient focus loss resumes by itself.
 typedef PlayingCallback = void Function(bool playing);
 
 class FlutterPcm {
