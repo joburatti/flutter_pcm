@@ -33,7 +33,7 @@ cd example && flutter test integration_test/android_playback_test.dart -d emulat
 
 To check Windows device failure by hand, play in the example app and unplug or disable the output device in Sound settings. The app should switch to paused, and pressing play should continue on the new default device.
 
-`android_playback_test.dart` runs on the device, so it can't inspect the stream from outside. It checks the pull rate, pause and resume, and the volume getter. To check audio focus by hand, play in the example app and simulate a call with `adb emu gsm call 5551234` and then `adb emu gsm cancel 5551234`. During the call, `adb shell dumpsys audio` should show our player `paused`, and afterwards `started`.
+`android_playback_test.dart` runs on the device, so it can't inspect the stream from outside. It checks the pull rate, pause and resume, and the volume getter. It also checks audio focus: a transient loss pauses and the regained focus resumes, pausing while waiting for focus cancels the resume, and a permanent loss pauses until the app plays again. To take focus away, it calls the `flutter_pcm_example/focus` channel in the example's `MainActivity`, which requests focus with its own listener; Android tracks focus per listener, so this competes with the player inside the same app. To check a real call by hand, play in the example app and simulate a call with `adb emu gsm call 5551234` and then `adb emu gsm cancel 5551234`. During the call, `adb shell dumpsys audio` should show our player `paused`, and afterwards `started`.
 
 The example app has `windows/`, `linux/` and `android/` runners. To try the Darwin code, first run `flutter create --platforms=macos,ios .` in `example/`.
 

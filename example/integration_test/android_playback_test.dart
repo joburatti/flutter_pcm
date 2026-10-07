@@ -3,12 +3,13 @@
 // Run with: flutter test integration_test/android_playback_test.dart -d <device>
 //
 // The test runs on the device, so it can't inspect the stream from the
-// outside the way the Linux test does with pactl. Audio focus is checked by
-// hand (see CLAUDE.md).
+// outside the way the Linux test does with pactl. Audio focus is taken away
+// through a channel in the example's MainActivity, which requests focus
+// itself the way a phone call or another app would.
 
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -17,7 +18,9 @@ import 'package:flutter_pcm/flutter_pcm.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('playback, pause and volume', (WidgetTester tester) async {
+  testWidgets('playback, pause, volume and audio focus', (
+    WidgetTester tester,
+  ) async {
     var framesRequested = 0;
     final externalVolumes = <double>[];
     final playingChanges = <bool>[];
@@ -88,7 +91,60 @@ void main() {
       framesRequested - afterStallFrames,
       inInclusiveRange(format.frequency * 1.5, format.frequency * 2.5),
     );
-    await FlutterPcm.setPlaying(false);
     expect(playingChanges, isEmpty);
+
+    const focus = MethodChannel('flutter_pcm_example/focus');
+    Future<void> takeFocus({required bool transient}) async {
+      expect(await focus.invokeMethod<bool>('request', transient), isTrue);
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+
+    Future<void> returnFocus() async {
+      await focus.invokeMethod<void>('abandon');
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+
+    Future<void> expectNoPulling() async {
+      final frames = framesRequested;
+      await Future.delayed(const Duration(milliseconds: 500));
+      expect(framesRequested, frames);
+    }
+
+    // A transient focus loss (like a phone call) pauses, and regaining focus
+    // resumes. Both are reported.
+    await takeFocus(transient: true);
+    expect(playingChanges, [false]);
+    await expectNoPulling();
+    final resumedFrom = framesRequested;
+    await returnFocus();
+    expect(playingChanges, [false, true]);
+    await Future.delayed(const Duration(milliseconds: 300));
+    expect(framesRequested, greaterThan(resumedFrom));
+
+    // Pausing while waiting for focus cancels the resume
+    await takeFocus(transient: true);
+    expect(playingChanges, [false, true, false]);
+    await FlutterPcm.setPlaying(false);
+    await returnFocus();
+    expect(playingChanges, [false, true, false]);
+    await expectNoPulling();
+
+    // A permanent loss pauses until the app plays again
+    await FlutterPcm.setPlaying(true);
+    await Future.delayed(const Duration(milliseconds: 300));
+    await takeFocus(transient: false);
+    expect(playingChanges, [false, true, false, false]);
+    await returnFocus();
+    expect(playingChanges, [false, true, false, false]);
+    await expectNoPulling();
+
+    // Playing again takes focus back
+    final replayedFrom = framesRequested;
+    await FlutterPcm.setPlaying(true);
+    await Future.delayed(const Duration(milliseconds: 500));
+    expect(framesRequested, greaterThan(replayedFrom));
+    expect(playingChanges, [false, true, false, false]);
+
+    await FlutterPcm.setPlaying(false);
   });
 }
