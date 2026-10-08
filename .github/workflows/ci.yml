@@ -141,3 +141,30 @@ jobs:
           disable-animations: true
           working-directory: example
           script: flutter test integration_test/android_playback_test.dart -d emulator-5554
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner has no audio endpoint. This installs the VB-CABLE virtual
+      # sound card.
+      - uses: LABSN/sound-ci-helpers@v1.0.4
+
+      - name: Start Windows Audio
+        shell: pwsh
+        run: |
+          Set-Service Audiosrv -StartupType Automatic
+          Start-Service Audiosrv
+          Get-Service Audiosrv, AudioEndpointBuilder
+          Get-CimInstance Win32_SoundDevice | Format-Table Name, Status
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Integration test
+        working-directory: example
+        run: flutter test integration_test/windows_playback_test.dart -d windows
