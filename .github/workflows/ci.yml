@@ -168,3 +168,28 @@ jobs:
       - name: Integration test
         working-directory: example
         run: flutter test integration_test/windows_playback_test.dart -d windows
+
+  # The Darwin implementation doesn't play yet, so this only builds. The
+  # example has no macos/ or ios/ runner checked in; generate them.
+  darwin:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Create runners
+        working-directory: example
+        run: flutter create --platforms=macos,ios .
+
+      - name: Build macOS
+        working-directory: example
+        run: flutter build macos --debug
+
+      - name: Build iOS
+        working-directory: example
+        run: flutter build ios --simulator --debug
