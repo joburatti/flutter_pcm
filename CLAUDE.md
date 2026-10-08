@@ -22,7 +22,7 @@ flutter pub get                       # in repo root and/or example/
 flutter analyze                       # lints: package:flutter_lints/flutter.yaml
 cd example && flutter run -d windows  # run the demo app (sine wave + volume slider)
 cd example && flutter test            # widget test (test/widget_test.dart)
-cd example && flutter test integration_test -d windows   # needs a real audio device
+cd example && flutter test integration_test/windows_playback_test.dart -d windows   # needs an audio device
 cd example && flutter build linux --debug
 cd example && flutter test integration_test/linux_playback_test.dart -d linux
 cd example && flutter build apk --debug
@@ -31,11 +31,20 @@ cd example && flutter test integration_test/android_playback_test.dart -d emulat
 
 `linux_playback_test.dart` plays silence. It uses `pactl` to check that the stream is created, corked and uncorked, that our volume changes reach the mixer without echoing back, and that mixer changes are reported back. It finds our stream by matching `application.process.id`. It also restarts `pipewire`/`pipewire-pulse` with `systemctl --user` (briefly interrupting other audio) to check that a server failure pauses and reports, that playing while the server is down is refused, and that playing afterwards reconnects with the same format and volume.
 
-To check Windows device failure by hand, play in the example app and unplug or disable the output device in Sound settings. The app should switch to paused, and pressing play should continue on the new default device.
+`windows_playback_test.dart` checks the pull rate, pause and resume, and a slow reply. It reads and sets our session's volume from outside, as the Volume Mixer does, with a PowerShell script (C# COM interop through `Add-Type`, `IAudioSessionManager2`, matched by process id). This checks that our changes reach the session without echoing back and that outside changes are reported. It doesn't cover device failure. To check Windows device failure by hand, play in the example app and unplug or disable the output device in Sound settings. The app should switch to paused, and pressing play should continue on the new default device.
 
 `android_playback_test.dart` runs on the device, so it can't inspect the stream from outside. It checks the pull rate, pause and resume, and the volume getter. It also checks audio focus: a transient loss pauses and the regained focus resumes, pausing while waiting for focus cancels the resume, and a permanent loss pauses until the app plays again. To take focus away, it calls the `flutter_pcm_example/focus` channel in the example's `MainActivity`, which requests focus with its own listener; Android tracks focus per listener, so this competes with the player inside the same app. To check a real call by hand, play in the example app and simulate a call with `adb emu gsm call 5551234` and then `adb emu gsm cancel 5551234`. During the call, `adb shell dumpsys audio` should show our player `paused`, and afterwards `started`.
 
 The example app has `windows/`, `linux/` and `android/` runners. To try the Darwin code, first run `flutter create --platforms=macos,ios .` in `example/`.
+
+### CI
+`.github/workflows/ci.yml` has one job per platform:
+- **linux**: analyze, widget test, and `linux_playback_test.dart`. The runner has no session or sound card. The job starts a user systemd manager with `loginctl enable-linger`, so the test's `systemctl --user` restarts work, and runs PipeWire with a null sink defined in a config file, so the sink survives restarts. It uses `xvfb-run`. It builds with clang 19 through symlinks on `PATH`, because Flutter always uses plain `clang++`, and Ubuntu 24.04's clang 18 can't use `std::expected` from libstdc++ 14.
+- **android**: builds the APK, then runs `android_playback_test.dart` on an API 35 emulator (KVM). Emulator audio stays enabled.
+- **windows**: installs the VB-CABLE virtual sound card (`LABSN/sound-ci-helpers`), starts `Audiosrv`, and runs `windows_playback_test.dart`. The runner's MSVC builds with `/WX`, and newer versions warn about more than older ones.
+- **darwin**: build only. It generates the `macos/` and `ios/` runners with `flutter create` and builds macOS and the iOS simulator.
+
+The Flutter version is pinned in `FLUTTER_VERSION`.
 
 ## Architecture
 
@@ -105,7 +114,7 @@ Remaining work:
 - Make `fillSpeakerBuffer` work. The render callback is real-time, while channel calls must be dispatched to the main thread and are asynchronous. It cannot block on Dart, so it needs something like a ring buffer that a main-thread or worker producer fills by calling `getSamples`.
 - Implement play/pause, volume, and `onVolumeChanged`.
 
-The iOS branch has never been compiled (there is no Swift toolchain on this machine). `outputProvider = fillSpeakerBuffer` captures `self` strongly, so `deinit` does not run while the audio unit exists.
+There is no Swift toolchain on this machine; CI builds both macOS and iOS. `outputProvider = fillSpeakerBuffer` captures `self` strongly, so `deinit` does not run while the audio unit exists.
 
 The podspec links `CoreAudio`, with deployment targets iOS 15 and macOS 12.
 

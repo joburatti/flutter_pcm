@@ -45,9 +45,14 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
     }
 
     init(registrar: FlutterPluginRegistrar) {
+        #if os(macOS)
+        let messenger = registrar.messenger
+        #elseif os(iOS)
+        let messenger = registrar.messenger()
+        #endif
         channel = FlutterMethodChannel(
             name: "flutter_pcm",
-            binaryMessenger: registrar.messenger
+            binaryMessenger: messenger
         )
         super.init()
     }

@@ -61,7 +61,7 @@ public:
   PcmPlayer &operator=(const PcmPlayer &) = delete;
 
   SetupResult Setup();
-  std::expected<std::monostate, std::string> Teardown();
+  void Teardown();
 
   void OnSamples(ByteVectorPtr samples);
 
