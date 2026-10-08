@@ -34,7 +34,7 @@ FlutterPcmPlugin::FlutterPcmPlugin(flutter::PluginRegistrarWindows *registrar)
           [this](auto n) { CallSampleCallback(n); },
           [this](auto f) { CallVolumeCallback(f); },
           [this](auto p) { CallPlayingCallback(p); }),
-      active_window_(nullptr) {
+      top_level_window_(nullptr) {
   channel_.SetMethodCallHandler([this](const auto &call, auto result) {
     HandleMethodCall(call, std::move(result));
   });
@@ -61,7 +61,15 @@ void FlutterPcmPlugin::HandleMethodCall(const FlutterCall &method_call,
                                         std::unique_ptr<FlutterResult> result) {
   switch (hash(method_call.method_name())) {
   case hash("setup"):
-    active_window_ = GetActiveWindow();
+    // Our window proc delegate runs in the top-level window that hosts the
+    // implicit view (id 0). GetActiveWindow() would depend on focus.
+    if (auto view = registrar_->GetViewById(0)) {
+      top_level_window_ = GetAncestor(view->GetNativeWindow(), GA_ROOT);
+    }
+    if (!top_level_window_) {
+      result->Error("no_window", "No top-level window to post messages to");
+      break;
+    }
     if (auto setup_res = pcm_player_.Setup(); setup_res.has_value()) {
       auto audio_format = setup_res.value();
       std::string sample_format(
@@ -117,21 +125,21 @@ void FlutterPcmPlugin::CallSampleCallback(uint32_t max_samples) {
            [deliver](auto ec, auto em, auto ed) { deliver(nullptr); },
            [deliver]() { deliver(nullptr); })}));
 
-  PostMessage(active_window_, WM_PROCESS_INVOCATIONS, 0, 0);
+  PostMessage(top_level_window_, WM_PROCESS_INVOCATIONS, 0, 0);
 }
 
 void FlutterPcmPlugin::CallVolumeCallback(float volume) {
   const std::lock_guard<std::mutex> lock(invocation_mutex_);
   invocation_queue_.emplace_back(FlutterMethodInvocation{
       "onVolumeChanged", std::make_unique<FlutterValue>(volume)});
-  PostMessage(active_window_, WM_PROCESS_INVOCATIONS, 0, 0);
+  PostMessage(top_level_window_, WM_PROCESS_INVOCATIONS, 0, 0);
 }
 
 void FlutterPcmPlugin::CallPlayingCallback(bool playing) {
   const std::lock_guard<std::mutex> lock(invocation_mutex_);
   invocation_queue_.emplace_back(FlutterMethodInvocation{
       "onPlayingChanged", std::make_unique<FlutterValue>(playing)});
-  PostMessage(active_window_, WM_PROCESS_INVOCATIONS, 0, 0);
+  PostMessage(top_level_window_, WM_PROCESS_INVOCATIONS, 0, 0);
 }
 
 void FlutterPcmPlugin::ProcessMethodInvocations() {

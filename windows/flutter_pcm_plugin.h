@@ -39,7 +39,7 @@ private:
   flutter::PluginRegistrarWindows *registrar_;
   int window_proc_id_;
   flutter::MethodChannel<FlutterValue> channel_;
-  HWND active_window_;
+  HWND top_level_window_;
 
   std::mutex invocation_mutex_;
   std::vector<FlutterMethodInvocation> invocation_queue_;
