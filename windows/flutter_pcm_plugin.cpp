@@ -22,10 +22,6 @@ constexpr uint64_t hash(std::string_view str) {
   return hash;
 }
 
-constexpr uint64_t operator"" _hash(const char *str, size_t len) {
-  return hash(std::string_view(str, len));
-}
-
 FlutterPcmPlugin::FlutterPcmPlugin(flutter::PluginRegistrarWindows *registrar)
     : registrar_(registrar),
       channel_(registrar->messenger(), "flutter_pcm",

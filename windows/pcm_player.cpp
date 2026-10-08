@@ -241,7 +241,7 @@ SetupResult PcmPlayer::Setup() {
   return result;
 }
 
-std::expected<std::monostate, std::string> PcmPlayer::Teardown() {
+void PcmPlayer::Teardown() {
   {
     const std::lock_guard<std::mutex> lock(mutex_);
     play_state_ = kExiting;
@@ -250,8 +250,6 @@ std::expected<std::monostate, std::string> PcmPlayer::Teardown() {
   if (audio_thread_.joinable()) {
     audio_thread_.join();
   }
-
-  return {};
 }
 
 // Called on the audio thread after the device failed, or reopening it did.
