@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.47.6
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev libpulse-dev \
+            pipewire pipewire-pulse wireplumber pulseaudio-utils \
+            dbus-user-session xvfb
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Analyze
+        run: |
+          flutter pub get
+          flutter analyze
+          cd example
+          flutter pub get
+          flutter analyze
+
+      - name: Widget test
+        working-directory: example
+        run: flutter test
+
+      # The runner has no login session and no sound card. Start a user
+      # systemd manager (the test restarts PipeWire with systemctl --user) and
+      # give PipeWire a null sink. The sink is configured in a file rather
+      # than loaded with pactl, so it comes back when the test restarts the
+      # server.
+      - name: Start PipeWire
+        run: |
+          mkdir -p ~/.config/pipewire/pipewire.conf.d
+          cat > ~/.config/pipewire/pipewire.conf.d/ci-null-sink.conf <<'EOF'
+          context.objects = [
+            { factory = adapter
+              args = {
+                factory.name     = support.null-audio-sink
+                node.name        = "ci-sink"
+                node.description = "CI null sink"
+                media.class      = Audio/Sink
+                audio.position   = [ FL FR ]
+                audio.rate       = 48000
+                object.linger    = true
+                monitor.channel-volumes = true
+              }
+            }
+          ]
+          EOF
+          sudo loginctl enable-linger "$USER"
+          runtime_dir="/run/user/$(id -u)"
+          for i in $(seq 50); do
+            [ -S "$runtime_dir/bus" ] && break
+            sleep 0.2
+          done
+          echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime_dir/bus" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="$runtime_dir"
+          systemctl --user daemon-reload
+          systemctl --user start pipewire pipewire-pulse wireplumber
+          for i in $(seq 50); do
+            pactl info >/dev/null 2>&1 && break
+            sleep 0.2
+          done
+          pactl info
+          pactl list short sinks
+
+      - name: Integration test
+        working-directory: example
+        run: xvfb-run -a flutter test integration_test/linux_playback_test.dart -d linux
+
+      - name: PipeWire logs
+        if: failure()
+        run: journalctl --user -n 200 --no-pager || true
