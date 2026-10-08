@@ -23,9 +23,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang cmake ninja-build pkg-config libgtk-3-dev libpulse-dev \
+            clang-19 cmake ninja-build pkg-config libgtk-3-dev libpulse-dev \
             pipewire pipewire-pulse wireplumber pulseaudio-utils \
             dbus-user-session xvfb
+          # Flutter builds with plain clang++. The default clang 18 can't use
+          # std::expected from the installed libstdc++ 14.
+          mkdir -p "$RUNNER_TEMP/clang"
+          ln -s /usr/bin/clang-19 "$RUNNER_TEMP/clang/clang"
+          ln -s /usr/bin/clang++-19 "$RUNNER_TEMP/clang/clang++"
+          echo "$RUNNER_TEMP/clang" >> "$GITHUB_PATH"
 
       - uses: subosito/flutter-action@v2
         with:
@@ -92,4 +98,4 @@ jobs:
 
       - name: PipeWire logs
         if: failure()
-        run: journalctl --user -n 200 --no-pager || true
+        run: journalctl --user -n 100 --no-pager -u pipewire -u pipewire-pulse -u wireplumber || true
