@@ -169,13 +169,16 @@ jobs:
         working-directory: example
         run: flutter test integration_test/windows_playback_test.dart -d windows
 
-  # The Darwin implementation doesn't play yet, so this only builds. The
-  # example has no macos/ or ios/ runner checked in; generate them.
+  # The example has no macos/ or ios/ runner checked in; generate them.
   darwin:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      # The runner has no audio device. On macOS this installs the Background
+      # Music virtual device.
+      - uses: LABSN/sound-ci-helpers@v1.0.4
 
       - uses: subosito/flutter-action@v2
         with:
@@ -190,6 +193,23 @@ jobs:
         working-directory: example
         run: flutter build macos --debug
 
+      - name: macOS integration test
+        working-directory: example
+        run: flutter test integration_test/darwin_playback_test.dart -d macos
+
       - name: Build iOS
         working-directory: example
         run: flutter build ios --simulator --debug
+
+      - name: iOS integration test
+        working-directory: example
+        run: |
+          udid=$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          print(next(d["udid"] for runtime, ds in sorted(devices.items(), reverse=True)
+                     if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")))
+          ')
+          echo "Simulator: $udid"
+          xcrun simctl bootstatus "$udid" -b
+          flutter test integration_test/darwin_playback_test.dart -d "$udid"
