@@ -15,7 +15,7 @@ Pod::Spec.new do |s|
   s.ios.deployment_target = '15.0'
   s.osx.deployment_target = '12.0'
 
-  s.framework = 'CoreAudio'
+  s.frameworks = 'AVFoundation', 'AudioToolbox', 'Accelerate'
   
   # Flutter.framework does not contain a i386 slice.
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
