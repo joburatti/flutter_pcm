@@ -1,43 +1,23 @@
-import AVFoundation
-import AudioUnit
+import Foundation
 
 #if os(macOS)
-    import Cocoa
     import FlutterMacOS
 #elseif os(iOS)
     import Flutter
-    import UIKit
 #endif
 
+// Names must match the Dart SampleFormat enum
 enum SampleFormat: String {
-    case unknown
     case float32
     case float64
     case uint8
     case uint16
     case uint32
-
-    static func from(avAudioFormat: AVAudioCommonFormat) -> SampleFormat {
-        switch avAudioFormat {
-        case .pcmFormatFloat32:
-            return .float32
-        case .pcmFormatFloat64:
-            return .float64
-        case .pcmFormatInt16:
-            return .uint16
-        case .pcmFormatInt32:
-            return .uint32
-        default:
-            return .unknown
-        }
-    }
 }
 
 public class FlutterPcmPlugin: NSObject, FlutterPlugin {
-    var audioUnit: AUAudioUnit! = nil
-    var audioRunning = false
-    var interruptionObserver: NSObjectProtocol? = nil
-    let channel: FlutterMethodChannel
+    private let channel: FlutterMethodChannel
+    private let player: PcmPlayer
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = FlutterPcmPlugin(registrar: registrar)
@@ -46,31 +26,32 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
 
     init(registrar: FlutterPluginRegistrar) {
         #if os(macOS)
-        let messenger = registrar.messenger
+            let messenger = registrar.messenger
         #elseif os(iOS)
-        let messenger = registrar.messenger()
+            let messenger = registrar.messenger()
         #endif
-        channel = FlutterMethodChannel(
+        let channel = FlutterMethodChannel(
             name: "flutter_pcm",
             binaryMessenger: messenger
+        )
+        self.channel = channel
+        // The player calls these on the main thread
+        player = PcmPlayer(
+            sampleCallback: { maxFrames, completion in
+                channel.invokeMethod("getSamples", arguments: maxFrames) {
+                    reply in
+                    completion((reply as? FlutterStandardTypedData)?.data)
+                }
+            },
+            playingCallback: { playing in
+                channel.invokeMethod("onPlayingChanged", arguments: playing)
+            }
         )
         super.init()
     }
 
-    deinit {
-        if let observer = interruptionObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-
-        if audioUnit != nil {
-            audioUnit.stopHardware()
-            audioUnit.deallocateRenderResources()
-            audioUnit = nil
-        }
-
-        #if os(iOS)
-            try? AVAudioSession.sharedInstance().setActive(false)
-        #endif
+    public func detachFromEngine(for registrar: FlutterPluginRegistrar) {
+        player.release()
     }
 
     public func handle(
@@ -79,117 +60,49 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
     ) {
         switch call.method {
         case "setup":
-            result(setup())
+            guard !player.isSetUp else {
+                result(
+                    FlutterError(
+                        code: "already_set_up",
+                        message: "setup has already been called",
+                        details: nil
+                    )
+                )
+                return
+            }
+            do {
+                let format = try player.setup()
+                result([
+                    "frequency": format.frequency,
+                    "channels": format.channels,
+                    "sampleFormat": SampleFormat.float32.rawValue,
+                ])
+            } catch {
+                NSLog("flutter_pcm: setup failed: %@", "\(error)")
+                result(nil)
+            }
         case "setPlaying":
+            guard let playing = call.arguments as? Bool else {
+                result(
+                    FlutterError(
+                        code: "bad_arguments",
+                        message: "setPlaying takes a bool",
+                        details: nil
+                    )
+                )
+                return
+            }
+            player.setPlaying(playing)
             result(nil)
         case "setVolume":
+            if let volume = call.arguments as? Double {
+                player.volume = Float(volume)
+            }
             result(nil)
         case "getVolume":
-            result(nil)
+            result(Double(player.volume))
         default:
             result(FlutterMethodNotImplemented)
         }
     }
-
-    private func setup() -> [String: Any]? {
-        do {
-            var result: [String: Any] = [:]
-
-            #if os(macOS)
-                let subType = kAudioUnitSubType_DefaultOutput
-            #elseif os(iOS)
-                let subType = kAudioUnitSubType_RemoteIO
-
-                let audioSession = AVAudioSession.sharedInstance()
-                // This will enable lock screen / silent mode playback. Other possible values would be Ambient or SoloAmbient
-                try audioSession.setCategory(.playback)
-
-                // Capture self weakly, otherwise the observer keeps the plugin
-                // alive and deinit never runs.
-                interruptionObserver = NotificationCenter.default.addObserver(
-                    forName: AVAudioSession.interruptionNotification,
-                    object: audioSession,
-                    queue: nil
-                ) { [weak self] notification in
-                    self?.audioSessionInterruptionHandler(
-                        notification: notification
-                    )
-                }
-
-                try audioSession.setActive(true)
-            #endif
-
-            let descr = AudioComponentDescription(
-                componentType: kAudioUnitType_Output,
-                componentSubType: subType,
-                componentManufacturer: kAudioUnitManufacturer_Apple,
-                componentFlags: 0,
-                componentFlagsMask: 0
-            )
-
-            try audioUnit = AUAudioUnit(componentDescription: descr)
-
-            let bus0 = audioUnit.inputBusses[0]
-            let format = bus0.format
-            result["frequency"] = NSNumber(value: Int(format.sampleRate))
-            result["channels"] = NSNumber(value: format.channelCount)
-            result["sampleFormat"] =
-                SampleFormat.from(avAudioFormat: format.commonFormat).rawValue
-
-            audioUnit.outputProvider = fillSpeakerBuffer
-            audioUnit.isOutputEnabled = true
-            try audioUnit.allocateRenderResources()
-            try audioUnit.startHardware()
-            audioRunning = true
-
-            return result
-        } catch let error as NSError {
-            NSLog("%@", error.userInfo)
-            return nil
-        }
-    }
-
-    private func fillSpeakerBuffer(
-        actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
-        timestapm: UnsafePointer<AudioTimeStamp>,
-        frameCount: AUAudioFrameCount,
-        inputBusNumber: Int,
-        audioBufferListPtr: UnsafeMutablePointer<AudioBufferList>
-    ) -> AUAudioUnitStatus {
-        //        NSLog("flurp")
-        /*
-        let audioBufferList = UnsafeMutableAudioBufferListPointer(
-            audioBufferListPtr
-        )
-        for audioBuffer in audioBufferList {
-            let res: FlutterResult
-        
-            DispatchQueue.main.async {
-                self.channel.invokeMethod("getSamples", arguments: frameCount, result: res)
-            }
-        
-        }
-         */
-        return noErr
-    }
-
-    #if os(iOS)
-        private func audioSessionInterruptionHandler(notification: Notification)
-        {
-            guard
-                let rawType = notification.userInfo?[
-                    AVAudioSessionInterruptionTypeKey
-                ] as? UInt,
-                let interruptionType = AVAudioSession.InterruptionType(
-                    rawValue: rawType
-                )
-            else {
-                return
-            }
-            if interruptionType == .began && audioRunning {
-                audioUnit.stopHardware()
-                audioRunning = false
-            }
-        }
-    #endif
 }
