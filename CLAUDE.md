@@ -10,7 +10,7 @@ Platform status:
 - **Windows**: complete (WASAPI, shared mode).
 - **Linux**: complete (PulseAudio client API; on this machine served by PipeWire through `pipewire-pulse`).
 - **Android**: complete (`AudioTrack` in Kotlin, with audio focus handling).
-- **iOS/macOS**: in progress, under `darwin/` with `sharedDarwinSource: true`. Only init and deinit exist so far (commit "step 1: init/deinit"). See "Darwin status" below.
+- **iOS/macOS**: plays, under `darwin/` with `sharedDarwinSource: true` (`AUAudioUnit`, double buffer). Not yet confirmed by ear.
 - No web implementation.
 
 ## Commands
@@ -27,6 +27,7 @@ cd example && flutter build linux --debug
 cd example && flutter test integration_test/linux_playback_test.dart -d linux
 cd example && flutter build apk --debug
 cd example && flutter test integration_test/android_playback_test.dart -d emulator-5554
+cd example && flutter test integration_test/darwin_playback_test.dart -d macos   # Darwin hosts only
 ```
 
 `linux_playback_test.dart` plays silence. It uses `pactl` to check that the stream is created, corked and uncorked, that our volume changes reach the mixer without echoing back, and that mixer changes are reported back. It finds our stream by matching `application.process.id`. It also restarts `pipewire`/`pipewire-pulse` with `systemctl --user` (briefly interrupting other audio) to check that a server failure pauses and reports, that playing while the server is down is refused, and that playing afterwards reconnects with the same format and volume.
@@ -35,6 +36,8 @@ cd example && flutter test integration_test/android_playback_test.dart -d emulat
 
 `android_playback_test.dart` runs on the device, so it can't inspect the stream from outside. It checks the pull rate, pause and resume, and the volume getter. It also checks audio focus: a transient loss pauses and the regained focus resumes, pausing while waiting for focus cancels the resume, and a permanent loss pauses until the app plays again. To take focus away, it calls the `flutter_pcm_example/focus` channel in the example's `MainActivity`, which requests focus with its own listener; Android tracks focus per listener, so this competes with the player inside the same app. To check a real call by hand, play in the example app and simulate a call with `adb emu gsm call 5551234` and then `adb emu gsm cancel 5551234`. During the call, `adb shell dumpsys audio` should show our player `paused`, and afterwards `started`.
 
+`darwin_playback_test.dart` runs on macOS or iOS. Like the Android test, it checks the pull rate, pause and resume, a slow reply, empty replies and the volume getter. It doesn't cover iOS interruptions or route changes.
+
 The example app has `windows/`, `linux/` and `android/` runners. To try the Darwin code, first run `flutter create --platforms=macos,ios .` in `example/`.
 
 ### CI
@@ -42,7 +45,7 @@ The example app has `windows/`, `linux/` and `android/` runners. To try the Darw
 - **linux**: analyze, widget test, and `linux_playback_test.dart`. The runner has no session or sound card. The job starts a user systemd manager with `loginctl enable-linger`, so the test's `systemctl --user` restarts work, and runs PipeWire with a null sink defined in a config file, so the sink survives restarts. It uses `xvfb-run`. It builds with clang 19 through symlinks on `PATH`, because Flutter always uses plain `clang++`, and Ubuntu 24.04's clang 18 can't use `std::expected` from libstdc++ 14.
 - **android**: builds the APK, then runs `android_playback_test.dart` on an API 35 emulator (KVM). Emulator audio stays enabled.
 - **windows**: installs the VB-CABLE virtual sound card (`LABSN/sound-ci-helpers`), starts `Audiosrv`, and runs `windows_playback_test.dart`. The runner's MSVC builds with `/WX`, and newer versions warn about more than older ones.
-- **darwin**: build only. It generates the `macos/` and `ios/` runners with `flutter create` and builds macOS and the iOS simulator.
+- **darwin**: installs the Background Music virtual device (`LABSN/sound-ci-helpers`), generates the `macos/` and `ios/` runners with `flutter create`, and builds and runs `darwin_playback_test.dart` on macOS and on a booted iPhone simulator.
 
 The Flutter version is pinned in `FLUTTER_VERSION`.
 
@@ -60,9 +63,9 @@ Dart → native calls:
 Native → Dart calls (handled in `_channelMethodCallHandler`):
 - `getSamples(int maxFrames)`: Dart must return a `Uint8List` of interleaved samples in the device format. At most one request is outstanding at a time. Native code never blocks on the reply and never gives up on it: a late reply is still played, unless it arrives while paused; then it may be dropped (a pause is a glitch anyway). So a reply always fits in one write, since nothing is written while a request is outstanding. The exception is a reply written to a device reopened after a failure, whose buffer may be smaller; what doesn't fit is dropped. An error or non-`Uint8List` reply counts as empty, and the next request comes after a short delay. A call to Dart is only really lost if its isolate goes away (hot restart); that isn't handled yet, and a second `setup()` currently fails. The argument counts **frames** (one sample per channel), although it is named "samples". Returning fewer bytes is allowed; native code writes `min(available, returned)` frames.
 - `onVolumeChanged(double)`: the session volume was changed outside the app (for example in the Windows volume mixer).
-- `onPlayingChanged(bool)`: the system paused or resumed playback on its own, or refused a `setPlaying(true)`. Every backend sends it when the audio device or server fails; Android also sends it for audio focus changes.
+- `onPlayingChanged(bool)`: the system paused or resumed playback on its own, or refused a `setPlaying(true)`. Windows, Linux and Android send it when the audio device or server fails; Android also sends it for audio focus changes, and iOS for interruptions, unplugged headphones and media services resets. On macOS the default output unit follows device changes by itself.
 
-The `SampleFormat` enum names (`float32, float64, uint8, uint16, uint32`) must match **exactly** across Dart, C++ (`pcm_player.h`, serialized with `magic_enum::enum_name`) and Swift (`String` raw values). Native code may also send `unknown`, and Dart's `byName` would throw on it. The `uint*` names really stand for the device's integer PCM formats (on Darwin, `Int16` maps to `uint16`).
+The `SampleFormat` enum names (`float32, float64, uint8, uint16, uint32`) must match **exactly** across Dart, C++ (`pcm_player.h`, serialized with `magic_enum::enum_name`) and Swift (`String` raw values). Native code may also send `unknown`, and Dart's `byName` would throw on it. The `uint*` names really stand for the device's integer PCM formats. Darwin always uses `float32`.
 
 ### Windows: `windows/`
 - `flutter_pcm_plugin_c_api.cpp` is the registration entry point (`FlutterPcmPluginCApi` in pubspec).
@@ -104,19 +107,18 @@ The `SampleFormat` enum names (`float32, float64, uint8, uint16, uint32`) must m
   - If a track write fails (for example `ERROR_DEAD_OBJECT`), playback pauses, `onPlayingChanged(false)` is sent and the track is dropped. The next `setPlaying(true)` rebuilds it with the format reported by `setup()`.
   - `release()` (from `onDetachedFromEngine`) sets the exiting state and joins the thread.
 
-### Darwin status: `darwin/Classes/FlutterPcmPlugin.swift`
-Current state:
-- `setup` creates an `AUAudioUnit`: `DefaultOutput` on macOS, `RemoteIO` on iOS (with an `AVAudioSession` set to playback). It reads the format from `inputBusses[0]`, sets `outputProvider = fillSpeakerBuffer`, and starts the hardware.
-- `fillSpeakerBuffer` is a stub. The `getSamples` round-trip is commented out.
-- `setPlaying`, `setVolume` and `getVolume` return `nil`.
+### Darwin: `darwin/Classes/`
+- `FlutterPcmPlugin.swift` handles the method channel. Everything runs on the main thread, so no thread hopping is needed for channel calls.
+- `PcmPlayer.swift` owns an output `AUAudioUnit`: `DefaultOutput` on macOS (follows the default device by itself), `RemoteIO` on iOS (with an `AVAudioSession` in the playback category, activated on play and deactivated on pause).
+  - The format is fixed at float32 **interleaved** stereo at the hardware rate, set on `inputBusses[0]`; the unit converts. On iOS `maximumFramesToRender` is 4096 (screen locked).
+  - The render callback (`outputProvider`) is real-time and asks for a few hundred frames at a time, so it can't call Dart. It plays from a `SampleQueue` and captures only the queue and a `DispatchSourceUserDataAdd` on the main queue, not the player, so the player can be released.
+  - `setPlaying` starts and stops the hardware. `setPlaying(true)` before `setup()` is remembered. Volume is a gain applied while copying (`vDSP_vsmul`); there's no per-app mixer, so `onVolumeChanged` is never sent.
+  - iOS: an interruption pauses and reports; when it ends with `shouldResume`, playback resumes and reports. `oldDeviceUnavailable` route changes (headphones unplugged) pause until the app plays again. A media services reset pauses and drops the unit; the next play rebuilds it.
+- `SampleQueue.swift` is the double buffer. Each buffer holds `max(rate / 20, maximumFramesToRender)` frames (a render call must fit in one buffer). The render thread reads the front buffer, counting frames read; when it is used up and the back buffer is ready, it swaps them and signals the dispatch source, whose handler asks Dart to fill the new back buffer. If the back buffer isn't ready, it plays silence. The fields are guarded by an `os_unfair_lock`; the render thread only uses `trylock`, and the main thread holds it just to read or flip fields. The back buffer's samples are copied without the lock, since the render thread doesn't touch an unready back buffer. A reply that arrives while paused is kept. An empty reply is asked again after 10 ms.
 
-Remaining work:
-- Make `fillSpeakerBuffer` work. The render callback is real-time, while channel calls must be dispatched to the main thread and are asynchronous. It cannot block on Dart, so it needs something like a ring buffer that a main-thread or worker producer fills by calling `getSamples`.
-- Implement play/pause, volume, and `onVolumeChanged`.
+There is no Swift toolchain on this machine; CI builds and tests both macOS and iOS.
 
-There is no Swift toolchain on this machine; CI builds both macOS and iOS. `outputProvider = fillSpeakerBuffer` captures `self` strongly, so `deinit` does not run while the audio unit exists.
-
-The podspec links `CoreAudio`, with deployment targets iOS 15 and macOS 12.
+The podspec links `AVFoundation`, `AudioToolbox` and `Accelerate`, with deployment targets iOS 15 and macOS 12 (so no `Synchronization.Atomic`).
 
 ## Known issues / gotchas
 - There is no `teardown` in the Dart API. Native players are torn down only when the plugin is destroyed.
