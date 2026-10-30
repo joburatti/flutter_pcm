@@ -37,6 +37,9 @@ using SetupResult = std::expected<AudioFormat, std::string>;
 
 // Plays PCM through WASAPI in shared mode on the default render endpoint.
 //
+// The stream only runs while playing. Pausing stops it, keeping the buffered
+// audio for when playback resumes.
+//
 // At most one getSamples request is outstanding. The audio thread doesn't
 // block on it: the reply is handed over through OnSamples, and is played
 // however late it comes. A reply that arrives while paused may be dropped:

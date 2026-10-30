@@ -16,8 +16,9 @@ import 'package:integration_test/integration_test.dart';
 import 'package:flutter_pcm/flutter_pcm.dart';
 
 /// Prints the master volume of the given process' audio session on the
-/// default render endpoint, after setting it if a volume is given. Setting it
-/// this way is what the Volume Mixer does.
+/// default render endpoint, after setting it if a volume is given, and then
+/// the session's state (0 inactive, 1 active). Setting the volume this way is
+/// what the Volume Mixer does.
 const _sessionVolumeScript = r'''
 param([int]$ProcessId, [string]$Volume)
 $ErrorActionPreference = 'Stop'
@@ -116,7 +117,9 @@ public static class SessionVolume {
       }
       float level;
       Marshal.ThrowExceptionForHR(simpleVolume.GetMasterVolume(out level));
-      return level.ToString(CultureInfo.InvariantCulture);
+      int state;
+      Marshal.ThrowExceptionForHR(session.GetState(out state));
+      return level.ToString(CultureInfo.InvariantCulture) + " " + state;
     }
     throw new Exception("No audio session for process " + processId);
   }
@@ -125,9 +128,9 @@ public static class SessionVolume {
 [SessionVolume]::Run($ProcessId, $Volume)
 ''';
 
-/// Our session's volume as the Volume Mixer sees it, after setting it from
-/// the outside if [set] is given.
-Future<double> sessionVolume([double? set]) async {
+/// Our session's volume and whether it is active, as the Volume Mixer sees
+/// them, after setting the volume from the outside if [set] is given.
+Future<({double volume, bool active})> session([double? set]) async {
   final script = File(
     '${Directory.systemTemp.path}\\flutter_pcm_session_volume.ps1',
   );
@@ -142,8 +145,14 @@ Future<double> sessionVolume([double? set]) async {
     if (set != null) '$set',
   ]);
   expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
-  return double.parse((res.stdout as String).trim());
+  final [volume, state] = (res.stdout as String).trim().split(' ');
+  return (volume: double.parse(volume), active: state == '1');
 }
+
+Future<double> sessionVolume([double? set]) async =>
+    (await session(set)).volume;
+
+Future<bool> sessionActive() async => (await session()).active;
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -176,9 +185,10 @@ void main() {
     expect(format.channels, greaterThan(0));
     expect(format.frequency, greaterThan(0));
 
-    // Nothing is pulled before playing
+    // Nothing is pulled before playing, and the stream isn't running
     await Future.delayed(const Duration(milliseconds: 300));
     expect(framesRequested, 0);
+    expect(await sessionActive(), isFalse);
 
     // Playing pulls samples at roughly the sample rate
     await FlutterPcm.setPlaying(true);
@@ -187,6 +197,7 @@ void main() {
     expect(playedFrames, greaterThan(format.frequency * 1.5));
     expect(playedFrames, lessThan(format.frequency * 2.5));
     expect(playingChanges, isEmpty);
+    expect(await sessionActive(), isTrue);
 
     // Our own volume changes reach the mixer without echoing back
     FlutterPcm.setVolume(0.5);
@@ -212,17 +223,19 @@ void main() {
     expect(externalVolumes.last, closeTo(0.3, 0.001));
     expect(await FlutterPcm.getVolume(), closeTo(0.3, 0.001));
 
-    // Pausing stops pulling samples
+    // Pausing stops pulling samples, and stops the stream
     await FlutterPcm.setPlaying(false);
     await Future.delayed(const Duration(milliseconds: 300));
     final pausedFrames = framesRequested;
     await Future.delayed(const Duration(milliseconds: 500));
     expect(framesRequested, pausedFrames);
+    expect(await sessionActive(), isFalse);
 
     // And resumes
     await FlutterPcm.setPlaying(true);
     await Future.delayed(const Duration(milliseconds: 500));
     expect(framesRequested, greaterThan(pausedFrames));
+    expect(await sessionActive(), isTrue);
 
     // A slow reply is waited for, and playback continues at the normal rate
     // afterwards. The stall blocks the isolate, so the timer can't fire

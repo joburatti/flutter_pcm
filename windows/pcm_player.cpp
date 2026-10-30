@@ -195,6 +195,22 @@ struct PcmPlayer::Device {
   uint32_t buffer_frame_count = 0;
   uint32_t sample_rate = 0;
   uint32_t frame_size = 0;
+  // Whether the stream is running. It is stopped while paused.
+  bool started = false;
+
+  // Starts or stops the stream, if it isn't in that state yet. Stopping keeps
+  // the buffered audio, which plays when the stream starts again, and leaves
+  // the session inactive.
+  HRESULT SetStarted(bool start) {
+    if (start == started) {
+      return S_OK;
+    }
+    HRESULT hr = start ? audio_client->Start() : audio_client->Stop();
+    if (SUCCEEDED(hr)) {
+      started = start;
+    }
+    return hr;
+  }
 
   ~Device() {
     if (audio_client) {
@@ -434,9 +450,7 @@ SetupResult PcmPlayer::OpenDevice(Device &device) {
     volume_ = v;
   }
 
-  hr = device.audio_client->Start();
-  CHECK_RESULT_SETUP("Start");
-
+  // ThreadMainLoop starts the stream when playing
   device.sample_rate = pwfx->nSamplesPerSec;
   device.frame_size = pwfx->nBlockAlign;
   const AudioFormat audio_format{pwfx->nSamplesPerSec, pwfx->nChannels, format};
@@ -449,8 +463,10 @@ SetupResult PcmPlayer::OpenDevice(Device &device) {
 // Returns false if the device has failed
 bool PcmPlayer::ThreadMainLoop(Device &device) {
   {
+    // A started stream is stopped first, below
     std::unique_lock<std::mutex> lock(mutex_);
-    if (play_state_ == kPaused && !apply_volume_ && !session_disconnected_) {
+    if (play_state_ == kPaused && !device.started && !apply_volume_ &&
+        !session_disconnected_) {
       cv_.wait(lock);
     }
     if (session_disconnected_) {
@@ -462,13 +478,16 @@ bool PcmPlayer::ThreadMainLoop(Device &device) {
     device.audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
   }
 
-  if (play_state_ != kPlaying) {
+  const bool playing = play_state_ == kPlaying;
+  HRESULT hr = device.SetStarted(playing);
+  CHECK_RESULT_MAIN_LOOP("SetStarted");
+  if (!playing) {
     return true;
   }
 
   const uint32_t buffer_frame_count = device.buffer_frame_count;
   uint32_t num_frames_padding;
-  HRESULT hr = device.audio_client->GetCurrentPadding(&num_frames_padding);
+  hr = device.audio_client->GetCurrentPadding(&num_frames_padding);
   CHECK_RESULT_MAIN_LOOP("GetCurrentPadding");
 
   // Below, waits are cut short by play state and volume changes, replies and
