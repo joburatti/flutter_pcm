@@ -221,12 +221,22 @@ jobs:
           ')
           echo "Simulator: $udid"
           xcrun simctl bootstatus "$udid" -b
-          # Installing or launching on the simulator sometimes hangs before the
-          # test starts. Give each attempt 10 minutes (macOS has no timeout
-          # command; perl's alarm survives exec) and try twice.
+          # Installing or launching on the simulator sometimes hangs, and
+          # retrying on the same simulator tends to hang again. Give each
+          # attempt 10 minutes (macOS has no timeout command; perl's alarm
+          # survives exec), and before the second, kill what the first left
+          # behind and erase and reboot the simulator. The expanded reporter
+          # prints progress as it goes, so a hang shows whether the test had
+          # started.
           for attempt in 1 2; do
+            if [ "$attempt" -gt 1 ]; then
+              pkill -f "simctl.*$udid" || true
+              xcrun simctl shutdown "$udid" || true
+              xcrun simctl erase "$udid"
+              xcrun simctl bootstatus "$udid" -b
+            fi
             perl -e 'alarm shift; exec @ARGV' 600 \
-              flutter test integration_test/darwin_playback_test.dart -d "$udid" && exit 0
+              flutter test -r expanded integration_test/darwin_playback_test.dart -d "$udid" && exit 0
             echo "Attempt $attempt failed"
           done
           exit 1
