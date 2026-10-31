@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Pull request runs test the merge with main, so other branches only run
+  # on pull requests (or by hand)
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

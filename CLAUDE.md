@@ -41,7 +41,7 @@ cd example && flutter test integration_test/darwin_playback_test.dart -d macos  
 The example app has `windows/`, `linux/` and `android/` runners. To try the Darwin code, first run `flutter create --platforms=macos,ios .` in `example/`.
 
 ### CI
-`.github/workflows/ci.yml` has one job per platform:
+`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`; other branches can be run by hand with `gh workflow run CI --ref <branch>`. It has one job per platform:
 - **linux**: analyze, widget test, and `linux_playback_test.dart`. The runner has no session or sound card. The job starts a user systemd manager with `loginctl enable-linger`, so the test's `systemctl --user` restarts work, and runs PipeWire with a null sink defined in a config file, so the sink survives restarts. It uses `xvfb-run`. It builds with clang 19 through symlinks on `PATH`, because Flutter always uses plain `clang++`, and Ubuntu 24.04's clang 18 can't use `std::expected` from libstdc++ 14.
 - **android**: builds the APK, then runs `android_playback_test.dart` on an API 35 emulator (KVM). Emulator audio stays enabled.
 - **windows**: installs the VB-CABLE virtual sound card (`LABSN/sound-ci-helpers`), starts `Audiosrv`, and runs `windows_playback_test.dart`. The runner's MSVC builds with `/WX`, and newer versions warn about more than older ones.
