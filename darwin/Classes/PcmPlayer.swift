@@ -121,13 +121,16 @@ final class PcmPlayer {
         #if os(iOS)
             observeSession()
         #endif
-
-        if playState == .pending {
-            if !start() {
-                playingCallback(false)
-            }
-        }
         return (Int(sampleRate), queue.channels)
+    }
+
+    // Starts playing if setPlaying(true) came before setup. Called after the
+    // reply to setup, so that Dart gets the first sample request, or the
+    // refusal, once setup has completed.
+    func startIfPending() {
+        if playState == .pending {
+            setPlaying(true)
+        }
     }
 
     func setPlaying(_ play: Bool) {
