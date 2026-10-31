@@ -45,7 +45,7 @@ The example app has `windows/`, `linux/` and `android/` runners. To try the Darw
 - **linux**: analyze, widget test, and `linux_playback_test.dart`. The runner has no session or sound card. The job starts a user systemd manager with `loginctl enable-linger`, so the test's `systemctl --user` restarts work, and runs PipeWire with a null sink defined in a config file, so the sink survives restarts. It uses `xvfb-run`. It builds with clang 19 through symlinks on `PATH`, because Flutter always uses plain `clang++`, and Ubuntu 24.04's clang 18 can't use `std::expected` from libstdc++ 14.
 - **android**: builds the APK, then runs `android_playback_test.dart` on an API 35 emulator (KVM). Emulator audio stays enabled.
 - **windows**: installs the VB-CABLE virtual sound card (`LABSN/sound-ci-helpers`), starts `Audiosrv`, and runs `windows_playback_test.dart`. The runner's MSVC builds with `/WX`, and newer versions warn about more than older ones.
-- **darwin**: installs the Background Music virtual device (`LABSN/sound-ci-helpers`), generates the `macos/` and `ios/` runners with `flutter create`, and builds and runs `darwin_playback_test.dart` on macOS and on a booted iPhone simulator.
+- **darwin**: installs the Background Music virtual device (`LABSN/sound-ci-helpers`), generates the `macos/` and `ios/` runners with `flutter create`, and builds and runs `darwin_playback_test.dart` on macOS and on a booted iPhone simulator. Installing or launching on the simulator sometimes hangs, so the iOS test gets 10 minutes and one retry on an erased and rebooted simulator.
 
 The Flutter version is pinned in `FLUTTER_VERSION`.
 

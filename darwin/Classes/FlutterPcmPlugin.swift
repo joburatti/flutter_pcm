@@ -78,6 +78,7 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
                     "channels": format.channels,
                     "sampleFormat": SampleFormat.float32.rawValue,
                 ])
+                player.startIfPending()
             } catch {
                 NSLog("flutter_pcm: setup failed: %@", "\(error)")
                 result(nil)
@@ -93,8 +94,10 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
                 )
                 return
             }
-            player.setPlaying(playing)
+            // Reply first, so that a refusal's onPlayingChanged(false)
+            // arrives after setPlaying completes
             result(nil)
+            player.setPlaying(playing)
         case "setVolume":
             if let volume = call.arguments as? Double {
                 player.volume = Float(volume)
