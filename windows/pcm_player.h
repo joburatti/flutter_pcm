@@ -64,6 +64,7 @@ public:
   PcmPlayer &operator=(const PcmPlayer &) = delete;
 
   SetupResult Setup();
+  bool is_set_up() const { return set_up_; }
   void Teardown();
 
   void OnSamples(ByteVectorPtr samples);
