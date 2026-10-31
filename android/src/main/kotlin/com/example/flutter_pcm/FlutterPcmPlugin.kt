@@ -37,6 +37,9 @@ class FlutterPcmPlugin : FlutterPlugin, MethodCallHandler {
 
         when (call.method) {
             "setup" -> {
+                if (player.isSetUp) {
+                    return result.error("already_set_up", "setup has already been called", null)
+                }
                 val format = try {
                     player.setup()
                 } catch (e: RuntimeException) {

@@ -56,6 +56,7 @@ The whole public API is the static class `FlutterPcm`, which talks over one `Met
 
 Dart → native calls:
 - `setup` returns `{frequency, channels, sampleFormat}`. `sampleFormat` is the string name of a `SampleFormat` enum value.
+  On failure every backend returns an error: `already_set_up` for a second call, `setup_failed` otherwise (with a message). Dart throws it as a `PlatformException` and restores the previous callbacks.
 - `setPlaying(bool)`
 - `setVolume(double)`
 - `getVolume`

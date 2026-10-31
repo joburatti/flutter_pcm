@@ -20,7 +20,7 @@ void main() {
     final result = await FlutterPcm.setup(
       (int i) => Float32List(i).buffer.asUint8List(),
     );
-    expect(result!.frequency, 48000);
+    expect(result.frequency, 48000);
     expect(result.channels, 2);
     expect(result.sampleFormat, SampleFormat.float32);
   });

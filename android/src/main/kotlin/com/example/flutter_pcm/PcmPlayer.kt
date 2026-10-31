@@ -112,6 +112,8 @@ class PcmPlayer(
 
     val isPlaying get() = playState == PlayState.PLAYING
 
+    val isSetUp get() = format != null
+
     private val isPaused get() = playState == PlayState.PAUSED || playState == PlayState.PENDING
 
     fun setup(): AudioFormat {
