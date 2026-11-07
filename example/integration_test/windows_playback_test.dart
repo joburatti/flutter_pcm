@@ -164,7 +164,7 @@ void main() {
     var stallNextReply = false;
 
     late AudioFormat format;
-    final result = await FlutterPcm.setup(
+    format = await FlutterPcm.setup(
       (int maxFrames) {
         framesRequested += maxFrames;
         if (stallNextReply) {
@@ -179,8 +179,6 @@ void main() {
     );
 
     // The shared-mode mix format is always float
-    expect(result, isNotNull);
-    format = result!;
     expect(format.sampleFormat, SampleFormat.float32);
     expect(format.channels, greaterThan(0));
     expect(format.frequency, greaterThan(0));

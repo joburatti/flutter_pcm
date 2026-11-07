@@ -80,8 +80,13 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
                 ])
                 player.startIfPending()
             } catch {
-                NSLog("flutter_pcm: setup failed: %@", "\(error)")
-                result(nil)
+                result(
+                    FlutterError(
+                        code: "setup_failed",
+                        message: "\(error)",
+                        details: nil
+                    )
+                )
             }
         case "setPlaying":
             guard let playing = call.arguments as? Bool else {

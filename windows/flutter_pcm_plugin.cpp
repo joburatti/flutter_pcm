@@ -57,13 +57,18 @@ void FlutterPcmPlugin::HandleMethodCall(const FlutterCall &method_call,
                                         std::unique_ptr<FlutterResult> result) {
   switch (hash(method_call.method_name())) {
   case hash("setup"):
+    if (pcm_player_.is_set_up()) {
+      result->Error("already_set_up", "setup has already been called");
+      break;
+    }
     // Our window proc delegate runs in the top-level window that hosts the
     // implicit view (id 0). GetActiveWindow() would depend on focus.
     if (auto view = registrar_->GetViewById(0)) {
       top_level_window_ = GetAncestor(view->GetNativeWindow(), GA_ROOT);
     }
     if (!top_level_window_) {
-      result->Error("no_window", "No top-level window to post messages to");
+      result->Error("setup_failed",
+                    "No top-level window to post messages to");
       break;
     }
     if (auto setup_res = pcm_player_.Setup(); setup_res.has_value()) {
@@ -75,7 +80,7 @@ void FlutterPcmPlugin::HandleMethodCall(const FlutterCall &method_call,
                                 {"channels", audio_format.channels},
                                 {"sampleFormat", sample_format}});
     } else {
-      result->Error(setup_res.error());
+      result->Error("setup_failed", setup_res.error());
     }
     break;
   case hash("setPlaying"): {

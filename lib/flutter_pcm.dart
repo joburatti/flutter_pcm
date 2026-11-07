@@ -30,18 +30,31 @@ class FlutterPcm {
   static VolumeCallback? _volumeCallback;
   static PlayingCallback? _playingCallback;
 
-  static Future<AudioFormat?> setup(
+  /// Opens the audio device and returns the format that [sampleCallback]
+  /// must produce.
+  ///
+  /// Throws a [PlatformException] if it fails. Its code is `already_set_up`
+  /// if setup has already succeeded, and `setup_failed` otherwise; then
+  /// setup can be called again. A failed call keeps the previous callbacks.
+  static Future<AudioFormat> setup(
     SampleCallback sampleCallback, {
     VolumeCallback? volumeCallback,
     PlayingCallback? playingCallback,
   }) async {
+    final previousSample = _sampleCallback;
+    final previousVolume = _volumeCallback;
+    final previousPlaying = _playingCallback;
     _sampleCallback = sampleCallback;
     _volumeCallback = volumeCallback;
     _playingCallback = playingCallback;
-    final res = await _methodChannel.invokeMapMethod<String, dynamic>('setup');
-
-    if (res == null) {
-      return null;
+    final Map<String, dynamic> res;
+    try {
+      res = (await _methodChannel.invokeMapMethod<String, dynamic>('setup'))!;
+    } catch (_) {
+      _sampleCallback = previousSample;
+      _volumeCallback = previousVolume;
+      _playingCallback = previousPlaying;
+      rethrow;
     }
 
     return AudioFormat(

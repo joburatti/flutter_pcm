@@ -25,7 +25,7 @@ void main() {
     var emptyReplies = 0;
 
     late AudioFormat format;
-    final result = await FlutterPcm.setup(
+    format = await FlutterPcm.setup(
       (int maxFrames) {
         if (emptyReplies > 0) {
           emptyReplies--;
@@ -43,8 +43,6 @@ void main() {
       playingCallback: playingChanges.add,
     );
 
-    expect(result, isNotNull);
-    format = result!;
     expect(format.sampleFormat, SampleFormat.float32);
     expect(format.channels, 2);
     expect(format.frequency, greaterThan(0));

@@ -132,6 +132,11 @@ FlMethodResponse *bad_arguments(const gchar *method) {
 }
 
 FlMethodResponse *setup(FlutterPcmPlugin *self) {
+  if (self->pcm_player->is_set_up()) {
+    return FL_METHOD_RESPONSE(fl_method_error_response_new(
+        "already_set_up", "setup has already been called", nullptr));
+  }
+
   auto setup_res = self->pcm_player->Setup();
   if (!setup_res.has_value()) {
     return FL_METHOD_RESPONSE(fl_method_error_response_new(
