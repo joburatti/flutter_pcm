@@ -6,6 +6,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -33,6 +34,10 @@ int volumePercent(Map<String, dynamic> sinkInput) {
   return int.parse((first['value_percent'] as String).replaceAll('%', ''));
 }
 
+/// The mixer percentage for a volume. Our volume is a linear gain, and
+/// PulseAudio's volume scale is cubic.
+int mixerPercent(double volume) => (pow(volume, 1 / 3) * 100).round();
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -43,6 +48,10 @@ void main() {
     final externalVolumes = <double>[];
     final playingChanges = <bool>[];
     var stallNextReply = false;
+
+    // The volume starts at 1, and a volume set before setup is applied by it
+    expect(await FlutterPcm.getVolume(), 1.0);
+    FlutterPcm.setVolume(0.8);
 
     late AudioFormat format;
     format = await FlutterPcm.setup(
@@ -63,10 +72,12 @@ void main() {
     expect(format.channels, greaterThan(0));
     expect(format.frequency, greaterThan(0));
 
-    // The stream exists but starts corked
+    // The stream exists but starts corked, with the volume set before setup
     final sinkInput = await findSinkInput();
     expect(sinkInput, isNotNull);
     expect(sinkInput!['corked'], isTrue);
+    expect(volumePercent(sinkInput), mixerPercent(0.8));
+    expect(await FlutterPcm.getVolume(), closeTo(0.8, 0.001));
     await Future.delayed(const Duration(milliseconds: 300));
     expect(framesRequested, 0);
 
@@ -81,9 +92,21 @@ void main() {
     // Our own volume changes reach the mixer without echoing back
     FlutterPcm.setVolume(0.5);
     await Future.delayed(const Duration(milliseconds: 300));
-    expect(volumePercent((await findSinkInput())!), 50);
+    expect(volumePercent((await findSinkInput())!), mixerPercent(0.5));
     expect(await FlutterPcm.getVolume(), closeTo(0.5, 0.001));
     expect(externalVolumes, isEmpty);
+
+    // Out of range volumes are clamped, and NaN is ignored
+    FlutterPcm.setVolume(1.5);
+    expect(await FlutterPcm.getVolume(), 1.0);
+    await Future.delayed(const Duration(milliseconds: 300));
+    expect(volumePercent((await findSinkInput())!), 100);
+    FlutterPcm.setVolume(-1);
+    expect(await FlutterPcm.getVolume(), 0.0);
+    FlutterPcm.setVolume(double.nan);
+    expect(await FlutterPcm.getVolume(), 0.0);
+    await Future.delayed(const Duration(milliseconds: 300));
+    expect(volumePercent((await findSinkInput())!), 0);
 
     // Dragging a slider sends many changes in a row; none may echo back
     for (var v = 0.0; v <= 1.0; v += 0.02) {
@@ -93,7 +116,7 @@ void main() {
     FlutterPcm.setVolume(0.5);
     await Future.delayed(const Duration(milliseconds: 300));
     expect(externalVolumes, isEmpty);
-    expect(volumePercent((await findSinkInput())!), 50);
+    expect(volumePercent((await findSinkInput())!), mixerPercent(0.5));
 
     // Mixer changes are reported back
     await Process.run('pactl', [
@@ -103,8 +126,8 @@ void main() {
     ]);
     await Future.delayed(const Duration(milliseconds: 300));
     expect(externalVolumes, isNotEmpty);
-    expect(externalVolumes.last, closeTo(0.3, 0.01));
-    expect(await FlutterPcm.getVolume(), closeTo(0.3, 0.01));
+    expect(externalVolumes.last, closeTo(pow(0.3, 3), 0.001));
+    expect(await FlutterPcm.getVolume(), closeTo(pow(0.3, 3), 0.001));
 
     // Pausing corks the stream and stops pulling samples
     await FlutterPcm.setPlaying(false);
@@ -133,6 +156,17 @@ void main() {
       inInclusiveRange(format.frequency * 1.5, format.frequency * 2.5),
     );
     expect(playingChanges, isEmpty);
+
+    // A mixer boost above 100% is reported as 1
+    await Process.run('pactl', [
+      'set-sink-input-volume',
+      '${sinkInput['index']}',
+      '130%',
+    ]);
+    await Future.delayed(const Duration(milliseconds: 300));
+    expect(externalVolumes.length, 2);
+    expect(externalVolumes.last, 1.0);
+    expect(await FlutterPcm.getVolume(), 1.0);
 
     // A server restart pauses playback and reports it
     final restart = await Process.run('systemctl', [
@@ -168,8 +202,8 @@ void main() {
       await Future.delayed(const Duration(milliseconds: 100));
     }
 
-    // Playing again reconnects with the format reported by setup, and our
-    // volume, without reporting either back
+    // Playing again reconnects with the format reported by setup, and the
+    // volume including the boost, without reporting either back
     await FlutterPcm.setPlaying(true);
     await Future.delayed(const Duration(seconds: 1));
     expect(playingChanges, [false, false]);
@@ -180,8 +214,8 @@ void main() {
       newSinkInput['sample_specification'],
       contains('${format.channels}ch ${format.frequency}Hz'),
     );
-    expect(volumePercent(newSinkInput), 30);
-    expect(externalVolumes.length, 1);
+    expect(volumePercent(newSinkInput), 130);
+    expect(externalVolumes.length, 2);
     await FlutterPcm.setPlaying(false);
   });
 }

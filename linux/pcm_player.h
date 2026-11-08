@@ -112,7 +112,10 @@ private:
   std::thread audio_thread_;
 
   std::atomic<PlayState> play_state_;
+  // A linear gain from 0 to 1
   std::atomic<float> volume_;
+  // Caller's thread only. Whether set_volume was called before Setup.
+  bool volume_set_ = false;
 
   // Guarded by the mainloop lock
   bool request_pending_ = false;
@@ -121,6 +124,8 @@ private:
   ByteVectorPtr samples_;
   // Set by an empty or failed reply, so the next request waits a while
   bool delay_request_ = false;
+  // The sink input volume we last set or saw. Unlike volume_, it keeps a
+  // mixer boost above 100%, which a reconnect restores.
   pa_volume_t pa_volume_ = PA_VOLUME_NORM;
   int pending_volume_sets_ = 0;
   bool notify_volume_changes_ = false;

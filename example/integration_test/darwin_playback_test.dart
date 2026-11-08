@@ -24,6 +24,10 @@ void main() {
     var stallNextReply = false;
     var emptyReplies = 0;
 
+    // The volume starts at 1, and a volume set before setup is applied by it
+    expect(await FlutterPcm.getVolume(), 1.0);
+    FlutterPcm.setVolume(0.8);
+
     late AudioFormat format;
     format = await FlutterPcm.setup(
       (int maxFrames) {
@@ -50,6 +54,7 @@ void main() {
     // Nothing is pulled before playing
     await Future.delayed(const Duration(milliseconds: 300));
     expect(framesRequested, 0);
+    expect(await FlutterPcm.getVolume(), closeTo(0.8, 0.001));
 
     // Playing pulls samples at roughly the sample rate
     await FlutterPcm.setPlaying(true);
@@ -65,6 +70,8 @@ void main() {
     FlutterPcm.setVolume(1.5);
     expect(await FlutterPcm.getVolume(), 1.0);
     FlutterPcm.setVolume(-1);
+    expect(await FlutterPcm.getVolume(), 0.0);
+    FlutterPcm.setVolume(double.nan);
     expect(await FlutterPcm.getVolume(), 0.0);
     FlutterPcm.setVolume(1);
     await Future.delayed(const Duration(milliseconds: 300));

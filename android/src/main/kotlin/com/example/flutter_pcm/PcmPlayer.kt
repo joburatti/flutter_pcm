@@ -235,6 +235,9 @@ class PcmPlayer(
     }
 
     fun setVolume(v: Float) {
+        if (v.isNaN()) {
+            return
+        }
         volume = v.coerceIn(0f, 1f)
         applyVolume()
     }

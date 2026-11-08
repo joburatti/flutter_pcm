@@ -4,6 +4,7 @@
 #include <audiopolicy.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <format>
 #include <initguid.h>
 #include <optional>
@@ -227,7 +228,7 @@ struct PcmPlayer::Device {
 PcmPlayer::PcmPlayer(SampleCallback sample_callback,
                      VolumeCallback volume_callback,
                      PlayingCallback playing_callback)
-    : play_state_(kPaused), volume_(0), apply_volume_(false),
+    : play_state_(kPaused), volume_(1), apply_volume_(false),
       sample_callback_(std::move(sample_callback)),
       volume_callback_(std::move(volume_callback)),
       playing_callback_(std::move(playing_callback)) {}
@@ -292,8 +293,12 @@ void PcmPlayer::set_play_state(PlayState s) {
 }
 
 void PcmPlayer::set_volume(float v) {
+  if (std::isnan(v)) {
+    return;
+  }
   const std::lock_guard<std::mutex> lock(mutex_);
-  volume_ = v;
+  // SetMasterVolume fails outside 0..1
+  volume_ = std::clamp(v, 0.0f, 1.0f);
   apply_volume_ = true;
   cv_.notify_all();
 }
@@ -441,12 +446,22 @@ SetupResult PcmPlayer::OpenDevice(Device &device) {
                                        std::out_ptr(device.audio_volume));
   CHECK_RESULT_SETUP("GetService SimpleAudioVolume");
 
-  if (reopening) {
-    // The session on the new device has its own volume
-    device.audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
+  // Apply our volume if the app set one before setup, or when reopening,
+  // since the session on the new device has its own volume. Otherwise
+  // follow the session's volume, which Windows remembers between runs.
+  if (reopening || apply_volume_) {
+    hr = device.audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
+    CHECK_RESULT_SETUP("SetMasterVolume");
+    // Only cleared once applied, so a failed setup keeps it for the next
+    // one. Setup blocks the platform thread, so set_volume can't race this.
+    // When reopening, a set_volume meanwhile is applied again by the loop.
+    if (!reopening) {
+      apply_volume_ = false;
+    }
   } else {
     float v = 0;
-    device.audio_volume->GetMasterVolume(&v);
+    hr = device.audio_volume->GetMasterVolume(&v);
+    CHECK_RESULT_SETUP("GetMasterVolume");
     volume_ = v;
   }
 
@@ -474,12 +489,14 @@ bool PcmPlayer::ThreadMainLoop(Device &device) {
     }
   }
 
+  HRESULT hr = S_OK;
   if (apply_volume_.exchange(false)) {
-    device.audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
+    hr = device.audio_volume->SetMasterVolume(volume_, &CONTEXT_GUID);
+    CHECK_RESULT_MAIN_LOOP("SetMasterVolume");
   }
 
   const bool playing = play_state_ == kPlaying;
-  HRESULT hr = device.SetStarted(playing);
+  hr = device.SetStarted(playing);
   CHECK_RESULT_MAIN_LOOP("SetStarted");
   if (!playing) {
     return true;
