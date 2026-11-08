@@ -163,6 +163,10 @@ void main() {
     final playingChanges = <bool>[];
     var stallNextReply = false;
 
+    // The volume starts at 1, and a volume set before setup is applied by it
+    expect(await FlutterPcm.getVolume(), 1.0);
+    FlutterPcm.setVolume(0.8);
+
     late AudioFormat format;
     format = await FlutterPcm.setup(
       (int maxFrames) {
@@ -188,6 +192,10 @@ void main() {
     expect(framesRequested, 0);
     expect(await sessionActive(), isFalse);
 
+    // The volume set before setup replaced the session's
+    expect(await sessionVolume(), closeTo(0.8, 0.001));
+    expect(await FlutterPcm.getVolume(), closeTo(0.8, 0.001));
+
     // Playing pulls samples at roughly the sample rate
     await FlutterPcm.setPlaying(true);
     await Future.delayed(const Duration(seconds: 2));
@@ -203,6 +211,18 @@ void main() {
     expect(await sessionVolume(), closeTo(0.5, 0.001));
     expect(await FlutterPcm.getVolume(), closeTo(0.5, 0.001));
     expect(externalVolumes, isEmpty);
+
+    // Out of range volumes are clamped, and NaN is ignored
+    FlutterPcm.setVolume(1.5);
+    expect(await FlutterPcm.getVolume(), 1.0);
+    await Future.delayed(const Duration(milliseconds: 300));
+    expect(await sessionVolume(), closeTo(1.0, 0.001));
+    FlutterPcm.setVolume(-1);
+    expect(await FlutterPcm.getVolume(), 0.0);
+    FlutterPcm.setVolume(double.nan);
+    expect(await FlutterPcm.getVolume(), 0.0);
+    await Future.delayed(const Duration(milliseconds: 300));
+    expect(await sessionVolume(), closeTo(0.0, 0.001));
 
     // Dragging a slider sends many changes in a row; none may echo back
     for (var v = 0.0; v <= 1.0; v += 0.02) {

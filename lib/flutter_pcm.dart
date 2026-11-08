@@ -11,6 +11,9 @@ class AudioFormat {
 }
 
 typedef SampleCallback = Uint8List Function(int maxSamples);
+
+/// Reports a volume change made outside the app, in the system mixer
+/// (Windows and Linux only). See [FlutterPcm.setVolume] for the scale.
 typedef VolumeCallback = void Function(double volume);
 
 /// Reports playback that the system paused or resumed on its own, and a
@@ -64,12 +67,29 @@ class FlutterPcm {
     );
   }
 
+  /// Sets the playback volume, a linear gain (amplitude) from 0 to 1: 0.5 is
+  /// about -6 dB. Values outside that range are clamped, and NaN is ignored.
+  ///
+  /// On Windows and Linux this is the app's volume in the system mixer,
+  /// which the user can change too (reported through the volume callback)
+  /// and which the system remembers between runs. Linux mixers show a cubic
+  /// scale, so 0.5 shows as 79%. Android and iOS/macOS have no per-app
+  /// mixer volume; the volume is a gain the player applies, and starts at 1
+  /// on every launch.
+  ///
+  /// It can be called before [setup]. Then [setup] applies it, replacing the
+  /// volume the system remembered.
   static void setVolume(double volume) {
     _methodChannel.invokeMethod("setVolume", volume);
   }
 
+  /// Returns the playback volume, on the same scale as [setVolume].
+  ///
+  /// Before [setup], it is 1 unless [setVolume] was called. After [setup],
+  /// on Windows and Linux, it is the volume the system remembered, unless
+  /// [setVolume] was called before [setup].
   static Future<double> getVolume() async {
-    return await _methodChannel.invokeMethod<double>("getVolume") ?? 0;
+    return await _methodChannel.invokeMethod<double>("getVolume") ?? 1;
   }
 
   static Future<void> setPlaying(bool p) async {

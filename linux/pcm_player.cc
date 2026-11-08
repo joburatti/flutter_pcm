@@ -132,7 +132,8 @@ SetupResult PcmPlayer::SetupLocked() {
     return std::unexpected("Server reported an invalid sample spec");
   }
 
-  if (auto connected = ConnectStreamLocked(false); !connected) {
+  // A volume the app set before setup replaces the one the server restored
+  if (auto connected = ConnectStreamLocked(volume_set_); !connected) {
     return std::unexpected(connected.error());
   }
 
@@ -159,9 +160,10 @@ PcmPlayer::ConnectResult PcmPlayer::ConnectContextLocked() {
   return {};
 }
 
-// Creates the stream with sample_spec_. When reconnecting after a failure,
-// restore_volume applies our volume to the new sink input; otherwise the
-// volume is read from it.
+// Creates the stream with sample_spec_. If restore_volume is set (when
+// reconnecting after a failure, or when the app set a volume before setup),
+// the stream is created with pa_volume_, so the server doesn't restore its
+// own; otherwise the volume is read from the new sink input.
 PcmPlayer::ConnectResult PcmPlayer::ConnectStreamLocked(bool restore_volume) {
   stream_ = pa_stream_new(context_, "PCM playback", &sample_spec_, nullptr);
   if (!stream_) {
@@ -186,8 +188,11 @@ PcmPlayer::ConnectResult PcmPlayer::ConnectStreamLocked(bool restore_volume) {
     flags |= PA_STREAM_START_CORKED;
   }
 
+  pa_cvolume cvolume;
+  pa_cvolume_set(&cvolume, sample_spec_.channels, pa_volume_);
   if (pa_stream_connect_playback(stream_, nullptr, &attr,
-                                 (pa_stream_flags_t)flags, nullptr,
+                                 (pa_stream_flags_t)flags,
+                                 restore_volume ? &cvolume : nullptr,
                                  nullptr) < 0) {
     return ContextError("pa_stream_connect_playback");
   }
@@ -212,11 +217,10 @@ PcmPlayer::ConnectResult PcmPlayer::ConnectStreamLocked(bool restore_volume) {
     return ContextError("pa_context_subscribe");
   }
 
-  if (restore_volume) {
-    ApplyVolumeLocked();
-  } else if (!WaitForOperation(pa_context_get_sink_input_info(
-                 context_, pa_stream_get_index(stream_), SinkInputInfoCallback,
-                 this))) {
+  if (!restore_volume &&
+      !WaitForOperation(pa_context_get_sink_input_info(
+          context_, pa_stream_get_index(stream_), SinkInputInfoCallback,
+          this))) {
     return ContextError("pa_context_get_sink_input_info");
   }
   notify_volume_changes_ = true;
@@ -311,25 +315,34 @@ void PcmPlayer::set_play_state(PlayState s) {
 }
 
 void PcmPlayer::set_volume(float v) {
-  v = std::clamp(v, 0.0f, 1.0f);
-  volume_ = v;
+  if (std::isnan(v)) {
+    return;
+  }
+  volume_ = std::clamp(v, 0.0f, 1.0f);
+  // Volume is a linear gain (amplitude), like on the other platforms.
+  // PulseAudio's volume scale is cubic, so the mixer shows 0.5 as 79%.
+  const pa_volume_t pa_volume = pa_sw_volume_from_linear(volume_);
 
   if (!mainloop_) {
+    // Setup creates the stream with it
+    pa_volume_ = pa_volume;
+    volume_set_ = true;
     return;
   }
 
   pa_threaded_mainloop_lock(mainloop_);
+  // Without a stream, reconnecting creates the new one with it
+  pa_volume_ = pa_volume;
   ApplyVolumeLocked();
   pa_threaded_mainloop_unlock(mainloop_);
 }
 
-// Sets the sink input volume to volume_
+// Sets the sink input volume to pa_volume_
 void PcmPlayer::ApplyVolumeLocked() {
   if (!stream_) {
     return;
   }
 
-  pa_volume_ = (pa_volume_t)std::lround(volume_ * PA_VOLUME_NORM);
   pa_cvolume cvolume;
   pa_cvolume_set(&cvolume, sample_spec_.channels, pa_volume_);
   auto op = pa_context_set_sink_input_volume(
@@ -550,7 +563,7 @@ void PcmPlayer::SinkInputInfoCallback(pa_context *, const pa_sink_input_info *i,
 
   self->pa_volume_ = v;
   // The mixer allows boosting above 100%, which the API can't represent
-  self->volume_ = std::min(1.0f, (float)v / PA_VOLUME_NORM);
+  self->volume_ = std::min(1.0f, (float)pa_sw_volume_to_linear(v));
   if (self->notify_volume_changes_) {
     self->volume_callback_(self->volume_);
   }
