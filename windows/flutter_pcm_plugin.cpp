@@ -1,7 +1,5 @@
 #include "flutter_pcm_plugin.h"
 
-#include "magic_enum.h"
-
 #include <flutter/method_result_functions.h>
 #include <flutter/plugin_registrar_windows.h>
 #include <flutter/standard_method_codec.h>
@@ -73,12 +71,9 @@ void FlutterPcmPlugin::HandleMethodCall(const FlutterCall &method_call,
     }
     if (auto setup_res = pcm_player_.Setup(); setup_res.has_value()) {
       auto audio_format = setup_res.value();
-      std::string sample_format(
-          magic_enum::enum_name(audio_format.sample_format));
       result->Success(
           flutter::EncodableMap{{"frequency", audio_format.frequency},
-                                {"channels", audio_format.channels},
-                                {"sampleFormat", sample_format}});
+                                {"channels", audio_format.channels}});
     } else {
       result->Error("setup_failed", setup_res.error());
     }
@@ -103,11 +98,11 @@ void FlutterPcmPlugin::HandleMethodCall(const FlutterCall &method_call,
   }
 }
 
-void FlutterPcmPlugin::CallSampleCallback(uint32_t max_samples) {
+void FlutterPcmPlugin::CallSampleCallback(uint32_t max_frames) {
   // Replies run on the platform thread, like the destructor, so checking
   // the token is enough to know the plugin still exists
   auto deliver = [this, alive = std::weak_ptr<int>(alive_)](
-                     ByteVectorPtr samples) {
+                     SampleVectorPtr samples) {
     if (!alive.expired()) {
       pcm_player_.OnSamples(std::move(samples));
     }
@@ -115,13 +110,14 @@ void FlutterPcmPlugin::CallSampleCallback(uint32_t max_samples) {
 
   const std::lock_guard<std::mutex> lock(invocation_mutex_);
   invocation_queue_.emplace_back(FlutterMethodInvocation(
-      {"getSamples", std::make_unique<FlutterValue>(max_samples),
+      {"getSamples", std::make_unique<FlutterValue>(max_frames),
        std::make_unique<flutter::MethodResultFunctions<>>(
            [deliver](const FlutterValue *result) {
-             auto bytes =
-                 result ? std::get_if<std::vector<uint8_t>>(result) : nullptr;
-             deliver(bytes ? std::make_unique<std::vector<uint8_t>>(*bytes)
-                           : nullptr);
+             // Anything but a Float32List counts as an empty reply
+             auto samples =
+                 result ? std::get_if<std::vector<float>>(result) : nullptr;
+             deliver(samples ? std::make_unique<std::vector<float>>(*samples)
+                             : nullptr);
            },
            [deliver](auto ec, auto em, auto ed) { deliver(nullptr); },
            [deliver]() { deliver(nullptr); })}));

@@ -1,16 +1,29 @@
+import 'dart:typed_data';
+
 import 'package:flutter/services.dart';
 
-enum SampleFormat { float32, float64, uint8, uint16, uint32 }
-
+/// The format that the sample callback must produce: 32-bit float samples
+/// at [frequency] frames per second, with [channels] samples per frame.
+///
+/// It is the output device's own rate and channel count, so nothing has to
+/// resample.
 class AudioFormat {
   final int frequency;
   final int channels;
-  final SampleFormat sampleFormat;
 
-  AudioFormat(this.frequency, this.channels, this.sampleFormat);
+  AudioFormat(this.frequency, this.channels);
 }
 
-typedef SampleCallback = Uint8List Function(int maxSamples);
+/// Produces the next block of audio, at most [maxFrames] frames.
+///
+/// A frame holds one sample per channel, so the returned list holds up to
+/// `maxFrames * channels` samples, interleaved, nominally from -1 to 1.
+/// Returning fewer frames is fine. Samples beyond [maxFrames] frames, and a
+/// trailing partial frame, are dropped.
+///
+/// An empty list, or a callback that throws, plays nothing: the next request
+/// comes after a short delay.
+typedef SampleCallback = Float32List Function(int maxFrames);
 
 /// Reports a volume change made outside the app, in the system mixer
 /// (Windows and Linux only). See [FlutterPcm.setVolume] for the scale.
@@ -60,11 +73,7 @@ class FlutterPcm {
       rethrow;
     }
 
-    return AudioFormat(
-      res["frequency"],
-      res["channels"],
-      SampleFormat.values.byName(res["sampleFormat"]),
-    );
+    return AudioFormat(res["frequency"], res["channels"]);
   }
 
   /// Sets the playback volume, a linear gain (amplitude) from 0 to 1: 0.5 is
@@ -79,8 +88,8 @@ class FlutterPcm {
   ///
   /// It can be called before [setup]. Then [setup] applies it, replacing the
   /// volume the system remembered.
-  static void setVolume(double volume) {
-    _methodChannel.invokeMethod("setVolume", volume);
+  static Future<void> setVolume(double volume) {
+    return _methodChannel.invokeMethod<void>("setVolume", volume);
   }
 
   /// Returns the playback volume, on the same scale as [setVolume].
@@ -99,8 +108,8 @@ class FlutterPcm {
   static Future<dynamic> _channelMethodCallHandler(MethodCall call) async {
     switch (call.method) {
       case "getSamples":
-        int sampleCount = call.arguments;
-        return _sampleCallback!(sampleCount);
+        int maxFrames = call.arguments;
+        return _sampleCallback!(maxFrames);
       case "onVolumeChanged":
         if (_volumeCallback != null) {
           _volumeCallback!(call.arguments);

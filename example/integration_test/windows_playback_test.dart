@@ -8,12 +8,13 @@
 // checking it by hand.
 
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'package:flutter_pcm/flutter_pcm.dart';
+
+import 'common.dart';
 
 /// Prints the master volume of the given process' audio session on the
 /// default render endpoint, after setting it if a volume is given, and then
@@ -158,38 +159,28 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('playback, pause and volume', (WidgetTester tester) async {
-    var framesRequested = 0;
+    final source = SilentSource();
     final externalVolumes = <double>[];
     final playingChanges = <bool>[];
-    var stallNextReply = false;
 
     // The volume starts at 1, and a volume set before setup is applied by it
     expect(await FlutterPcm.getVolume(), 1.0);
-    FlutterPcm.setVolume(0.8);
+    await FlutterPcm.setVolume(0.8);
 
     late AudioFormat format;
     format = await FlutterPcm.setup(
-      (int maxFrames) {
-        framesRequested += maxFrames;
-        if (stallNextReply) {
-          stallNextReply = false;
-          // Blocks the isolate, like a long frame or a breakpoint would
-          sleep(const Duration(milliseconds: 1500));
-        }
-        return Uint8List(maxFrames * format.channels * 4);
-      },
+      source.call,
       volumeCallback: externalVolumes.add,
       playingCallback: playingChanges.add,
     );
+    source.format = format;
 
-    // The shared-mode mix format is always float
-    expect(format.sampleFormat, SampleFormat.float32);
     expect(format.channels, greaterThan(0));
     expect(format.frequency, greaterThan(0));
 
     // Nothing is pulled before playing, and the stream isn't running
     await Future.delayed(const Duration(milliseconds: 300));
-    expect(framesRequested, 0);
+    expect(source.framesRequested, 0);
     expect(await sessionActive(), isFalse);
 
     // The volume set before setup replaced the session's
@@ -199,37 +190,37 @@ void main() {
     // Playing pulls samples at roughly the sample rate
     await FlutterPcm.setPlaying(true);
     await Future.delayed(const Duration(seconds: 2));
-    final playedFrames = framesRequested;
+    final playedFrames = source.framesRequested;
     expect(playedFrames, greaterThan(format.frequency * 1.5));
     expect(playedFrames, lessThan(format.frequency * 2.5));
     expect(playingChanges, isEmpty);
     expect(await sessionActive(), isTrue);
 
     // Our own volume changes reach the mixer without echoing back
-    FlutterPcm.setVolume(0.5);
+    await FlutterPcm.setVolume(0.5);
     await Future.delayed(const Duration(milliseconds: 300));
     expect(await sessionVolume(), closeTo(0.5, 0.001));
     expect(await FlutterPcm.getVolume(), closeTo(0.5, 0.001));
     expect(externalVolumes, isEmpty);
 
     // Out of range volumes are clamped, and NaN is ignored
-    FlutterPcm.setVolume(1.5);
+    await FlutterPcm.setVolume(1.5);
     expect(await FlutterPcm.getVolume(), 1.0);
     await Future.delayed(const Duration(milliseconds: 300));
     expect(await sessionVolume(), closeTo(1.0, 0.001));
-    FlutterPcm.setVolume(-1);
+    await FlutterPcm.setVolume(-1);
     expect(await FlutterPcm.getVolume(), 0.0);
-    FlutterPcm.setVolume(double.nan);
+    await FlutterPcm.setVolume(double.nan);
     expect(await FlutterPcm.getVolume(), 0.0);
     await Future.delayed(const Duration(milliseconds: 300));
     expect(await sessionVolume(), closeTo(0.0, 0.001));
 
     // Dragging a slider sends many changes in a row; none may echo back
     for (var v = 0.0; v <= 1.0; v += 0.02) {
-      FlutterPcm.setVolume(v);
+      await FlutterPcm.setVolume(v);
       await Future.delayed(const Duration(milliseconds: 2));
     }
-    FlutterPcm.setVolume(0.5);
+    await FlutterPcm.setVolume(0.5);
     await Future.delayed(const Duration(milliseconds: 300));
     expect(externalVolumes, isEmpty);
     expect(await sessionVolume(), closeTo(0.5, 0.001));
@@ -244,29 +235,32 @@ void main() {
     // Pausing stops pulling samples, and stops the stream
     await FlutterPcm.setPlaying(false);
     await Future.delayed(const Duration(milliseconds: 300));
-    final pausedFrames = framesRequested;
+    final pausedFrames = source.framesRequested;
     await Future.delayed(const Duration(milliseconds: 500));
-    expect(framesRequested, pausedFrames);
+    expect(source.framesRequested, pausedFrames);
     expect(await sessionActive(), isFalse);
 
     // And resumes
     await FlutterPcm.setPlaying(true);
     await Future.delayed(const Duration(milliseconds: 500));
-    expect(framesRequested, greaterThan(pausedFrames));
+    expect(source.framesRequested, greaterThan(pausedFrames));
     expect(await sessionActive(), isTrue);
 
     // A slow reply is waited for, and playback continues at the normal rate
     // afterwards. The stall blocks the isolate, so the timer can't fire
     // before it is over.
-    stallNextReply = true;
+    source.stallNextReply = true;
     await Future.delayed(const Duration(milliseconds: 300));
-    expect(stallNextReply, isFalse);
-    final afterStallFrames = framesRequested;
+    expect(source.stallNextReply, isFalse);
+    final afterStallFrames = source.framesRequested;
     await Future.delayed(const Duration(seconds: 2));
     expect(
-      framesRequested - afterStallFrames,
+      source.framesRequested - afterStallFrames,
       inInclusiveRange(format.frequency * 1.5, format.frequency * 2.5),
     );
+
+    // Odd replies don't stop playback
+    await expectOddRepliesHandled(source);
     expect(playingChanges, isEmpty);
 
     await FlutterPcm.setPlaying(false);

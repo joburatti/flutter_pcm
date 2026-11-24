@@ -31,7 +31,7 @@ public:
   void HandleMethodCall(const FlutterCall &method_call,
                         std::unique_ptr<FlutterResult> result);
 
-  void CallSampleCallback(uint32_t max_samples);
+  void CallSampleCallback(uint32_t max_frames);
   void CallVolumeCallback(float volume);
   void CallPlayingCallback(bool playing);
 

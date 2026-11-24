@@ -13,7 +13,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.util.Log
-import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -21,11 +20,8 @@ import kotlin.math.max
 import kotlin.math.min
 import android.media.AudioFormat as AndroidAudioFormat
 
-// Names must match the Dart SampleFormat enum
-@Suppress("EnumEntryName")
-enum class SampleFormat { float32, float64, uint8, uint16, uint32 }
-
-data class AudioFormat(val frequency: Int, val channels: Int, val sampleFormat: SampleFormat)
+// Samples are always float32
+data class AudioFormat(val frequency: Int, val channels: Int)
 
 // Asks Dart for up to maxFrames frames. The reply must be passed to
 // PcmPlayer.onSamples on the main thread.
@@ -84,8 +80,11 @@ class PcmPlayer(
     // Guarded by lock
     private var requestPending = false
     private var requestedFrames = 0
-    // A reply that hasn't been written yet
-    private var samples: ByteBuffer? = null
+    // A reply that hasn't been written yet, interleaved float32 samples. Only
+    // the first samplesCount are written: the rest exceeds the request, or is
+    // a partial frame.
+    private var samples: FloatArray? = null
+    private var samplesCount = 0
     // Set by an empty or failed reply, so the next request waits a while
     private var delayRequest = false
 
@@ -123,7 +122,7 @@ class PcmPlayer(
         // format avoids resampling and takes the fast path
         val frequency = audioManager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
             ?.toIntOrNull() ?: 48000
-        val newFormat = AudioFormat(frequency, 2, SampleFormat.float32)
+        val newFormat = AudioFormat(frequency, 2)
         createTrack(newFormat)
         format = newFormat
 
@@ -164,7 +163,7 @@ class PcmPlayer(
 
         audioThread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-            threadMainLoop(newTrack, frameSize)
+            threadMainLoop(newTrack, format.channels)
         }, "flutter_pcm audio").apply { start() }
     }
 
@@ -371,7 +370,7 @@ class PcmPlayer(
     // from Dart and writes the reply, same as on Windows and Linux. Writes
     // are non-blocking so that pausing (which stops the playback head) can
     // never stall the thread.
-    private fun threadMainLoop(track: AudioTrack, frameSize: Int) {
+    private fun threadMainLoop(track: AudioTrack, channels: Int) {
         val bufferFrames = track.bufferSizeInFrames
         val minRequestFrames = bufferFrames / 2
         val minRequestMs = max(1L, minRequestFrames * 1000L / track.sampleRate)
@@ -414,7 +413,7 @@ class PcmPlayer(
             // Waits below are cut short by play state changes and replies;
             // the next round then looks again
             val toWrite = lock.withLock {
-                val s = samples
+                val s = samples?.let { it to samplesCount }
                 when {
                     playState != PlayState.PLAYING -> {}
 
@@ -446,7 +445,8 @@ class PcmPlayer(
                 null
             } ?: continue
 
-            val written = track.write(toWrite, toWrite.remaining(), AudioTrack.WRITE_NON_BLOCKING)
+            val (array, count) = toWrite
+            val written = track.write(array, 0, count, AudioTrack.WRITE_NON_BLOCKING)
             if (written < 0) {
                 // The track can't be used anymore (ERROR_DEAD_OBJECT), or a
                 // bug. Either way pause and let the next play rebuild it.
@@ -454,19 +454,19 @@ class PcmPlayer(
                 mainHandler.post { onTrackFailed(track) }
                 return
             }
-            framesWritten += written / frameSize
+            framesWritten += written / channels
             // Fits, since nothing has been written since the request. Only a
             // rebuilt track may have a smaller buffer; the rest is dropped then.
-            if (toWrite.hasRemaining()) {
-                Log.w(TAG, "Dropped ${toWrite.remaining()} bytes that didn't fit")
+            if (written < count) {
+                Log.w(TAG, "Dropped ${count - written} samples that didn't fit")
             }
         }
     }
 
     // Called on the main thread with the reply to the outstanding request,
     // or null if it failed
-    fun onSamples(bytes: ByteArray?) {
-        val frameSize = (format ?: return).channels * 4
+    fun onSamples(reply: FloatArray?) {
+        val channels = (format ?: return).channels
         lock.withLock {
             if (!requestPending) {
                 return
@@ -474,11 +474,12 @@ class PcmPlayer(
             requestPending = false
 
             // Only whole frames, and no more than requested
-            val usable = bytes?.let { min(it.size, requestedFrames * frameSize) } ?: 0
+            val usable = reply?.let { min(it.size, requestedFrames * channels) } ?: 0
             if (playState != PlayState.PLAYING) {
                 // Dropped, see the class comment
-            } else if (usable >= frameSize) {
-                samples = ByteBuffer.wrap(bytes!!, 0, usable - usable % frameSize)
+            } else if (usable >= channels) {
+                samples = reply
+                samplesCount = usable - usable % channels
             } else {
                 delayRequest = true
             }

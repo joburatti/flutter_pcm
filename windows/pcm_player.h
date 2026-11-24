@@ -18,24 +18,26 @@
 #include "mmreg.h"
 
 namespace flutter_pcm {
-using ByteVectorPtr = std::unique_ptr<std::vector<uint8_t>>;
+// Interleaved float32 samples
+using SampleVectorPtr = std::unique_ptr<std::vector<float>>;
 // Asks Dart for up to max_frames frames. The reply must be passed to
 // PcmPlayer::OnSamples on the platform thread.
 using SampleCallback = std::function<void(uint32_t max_frames)>;
 using VolumeCallback = std::function<void(float)>;
 using PlayingCallback = std::function<void(bool)>;
 
-enum SampleFormat { unknown, float32, float64, uint8, uint16, uint32 };
-
+// Samples are always float32
 struct AudioFormat {
   uint32_t frequency;
   uint32_t channels;
-  SampleFormat sample_format;
 };
 
 using SetupResult = std::expected<AudioFormat, std::string>;
 
 // Plays PCM through WASAPI in shared mode on the default render endpoint.
+//
+// The stream is float32 at the mix format's rate and channel count. Windows
+// converts it to the mix format's sample type if that differs.
 //
 // The stream only runs while playing. Pausing stops it, keeping the buffered
 // audio for when playback resumes.
@@ -67,7 +69,7 @@ public:
   bool is_set_up() const { return set_up_; }
   void Teardown();
 
-  void OnSamples(ByteVectorPtr samples);
+  void OnSamples(SampleVectorPtr samples);
 
   void set_play_state(PlayState s);
   void set_volume(float v);
@@ -87,7 +89,7 @@ private:
 
   // Platform thread only
   bool set_up_ = false;
-  uint32_t frame_size_ = 0;
+  uint32_t channels_ = 0;
 
   // The WAVEFORMATEX (with its extension) reported by Setup, reused when the
   // device is reopened. Written by the audio thread before it fulfills the
@@ -104,7 +106,7 @@ private:
   bool request_pending_ = false;
   uint32_t requested_frames_ = 0;
   // A reply that hasn't been written yet
-  ByteVectorPtr samples_;
+  SampleVectorPtr samples_;
   // Set by an empty or failed reply, so the next request waits a while
   bool delay_request_ = false;
 

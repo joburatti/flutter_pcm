@@ -21,7 +21,7 @@ struct _FlutterPcmPlugin {
 G_DEFINE_TYPE(FlutterPcmPlugin, flutter_pcm_plugin, g_object_get_type())
 
 namespace {
-using flutter_pcm::ByteVectorPtr;
+using flutter_pcm::SampleVectorPtr;
 
 // Method channel calls must be made on the GTK main thread, while samples and
 // volume changes are requested from the audio threads. These structs carry an
@@ -60,10 +60,11 @@ void sample_response_cb(GObject *object, GAsyncResult *result,
   FlValue *value =
       response ? fl_method_response_get_result(response, &error) : nullptr;
 
-  ByteVectorPtr samples;
-  if (value && fl_value_get_type(value) == FL_VALUE_TYPE_UINT8_LIST) {
-    const uint8_t *data = fl_value_get_uint8_list(value);
-    samples = std::make_unique<std::vector<uint8_t>>(
+  // Anything but a Float32List counts as an empty reply
+  SampleVectorPtr samples;
+  if (value && fl_value_get_type(value) == FL_VALUE_TYPE_FLOAT32_LIST) {
+    const float *data = fl_value_get_float32_list(value);
+    samples = std::make_unique<std::vector<float>>(
         data, data + fl_value_get_length(value));
   }
 
@@ -149,10 +150,6 @@ FlMethodResponse *setup(FlutterPcmPlugin *self) {
                            fl_value_new_int(audio_format.frequency));
   fl_value_set_string_take(result, "channels",
                            fl_value_new_int(audio_format.channels));
-  fl_value_set_string_take(
-      result, "sampleFormat",
-      fl_value_new_string(
-          flutter_pcm::sample_format_name(audio_format.sample_format)));
   return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
 }
 } // namespace

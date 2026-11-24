@@ -1,8 +1,8 @@
 import AVFoundation
 import AudioToolbox
 
-// Asks Dart for up to maxFrames frames. The reply (nil if it wasn't a
-// Uint8List) must be passed to the completion on the main thread.
+// Asks Dart for up to maxFrames frames. The reply's bytes (nil if it wasn't
+// a Float32List) must be passed to the completion on the main thread.
 typealias SampleCallback = (
     _ maxFrames: Int, _ completion: @escaping (Data?) -> Void
 ) -> Void
