@@ -6,15 +6,6 @@ import Foundation
     import Flutter
 #endif
 
-// Names must match the Dart SampleFormat enum
-enum SampleFormat: String {
-    case float32
-    case float64
-    case uint8
-    case uint16
-    case uint32
-}
-
 public class FlutterPcmPlugin: NSObject, FlutterPlugin {
     private let channel: FlutterMethodChannel
     private let player: PcmPlayer
@@ -40,8 +31,9 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
             sampleCallback: { maxFrames, completion in
                 channel.invokeMethod("getSamples", arguments: maxFrames) {
                     reply in
-                    let bytes = reply as? FlutterStandardTypedData
-                    completion(bytes?.type == .uInt8 ? bytes?.data : nil)
+                    // Anything but a Float32List counts as an empty reply
+                    let samples = reply as? FlutterStandardTypedData
+                    completion(samples?.type == .float32 ? samples?.data : nil)
                 }
             },
             playingCallback: { playing in
@@ -76,7 +68,6 @@ public class FlutterPcmPlugin: NSObject, FlutterPlugin {
                 result([
                     "frequency": format.frequency,
                     "channels": format.channels,
-                    "sampleFormat": SampleFormat.float32.rawValue,
                 ])
                 player.startIfPending()
             } catch {

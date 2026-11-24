@@ -37,42 +37,7 @@ void unref_operation(pa_operation *op) {
   }
 }
 
-// Picks the sample format we ask the server for. The server's default format
-// is used when we can express it; otherwise fall back to float32 and let the
-// server convert.
-SampleFormat choose_sample_format(pa_sample_format_t &format) {
-  switch (format) {
-  case PA_SAMPLE_FLOAT32NE:
-    return float32;
-  case PA_SAMPLE_S16NE:
-    return uint16;
-  case PA_SAMPLE_S32NE:
-    return uint32;
-  case PA_SAMPLE_U8:
-    return uint8;
-  default:
-    format = PA_SAMPLE_FLOAT32NE;
-    return float32;
-  }
-}
 } // namespace
-
-const char *sample_format_name(SampleFormat format) {
-  switch (format) {
-  case float32:
-    return "float32";
-  case float64:
-    return "float64";
-  case uint8:
-    return "uint8";
-  case uint16:
-    return "uint16";
-  case uint32:
-    return "uint32";
-  default:
-    return "unknown";
-  }
-}
 
 PcmPlayer::PcmPlayer(std::string app_name, SampleCallback sample_callback,
                      VolumeCallback volume_callback,
@@ -121,13 +86,15 @@ SetupResult PcmPlayer::SetupLocked() {
     return std::unexpected(connected.error());
   }
 
-  // Use the server's default format, like the mix format on Windows
+  // Use the server's default rate and channels, like the mix format on
+  // Windows, so nothing resamples. The server converts float32 to its own
+  // sample format.
   if (!WaitForOperation(
           pa_context_get_server_info(context_, ServerInfoCallback, this))) {
     return ContextError("pa_context_get_server_info");
   }
 
-  const auto sample_format = choose_sample_format(sample_spec_.format);
+  sample_spec_.format = PA_SAMPLE_FLOAT32NE;
   if (!pa_sample_spec_valid(&sample_spec_)) {
     return std::unexpected("Server reported an invalid sample spec");
   }
@@ -137,7 +104,7 @@ SetupResult PcmPlayer::SetupLocked() {
     return std::unexpected(connected.error());
   }
 
-  return AudioFormat{sample_spec_.rate, sample_spec_.channels, sample_format};
+  return AudioFormat{sample_spec_.rate, sample_spec_.channels};
 }
 
 PcmPlayer::ConnectResult PcmPlayer::ConnectContextLocked() {
@@ -433,8 +400,9 @@ void PcmPlayer::ThreadMainLoop() {
     if (samples_) {
       // Fits, since nothing has been written since the request. After a
       // reconnect the server accepts it anyway.
-      if (pa_stream_write(stream_, samples_->data(), samples_->size(), nullptr,
-                          0, PA_SEEK_RELATIVE) < 0) {
+      if (pa_stream_write(stream_, samples_->data(),
+                          samples_->size() * sizeof(float), nullptr, 0,
+                          PA_SEEK_RELATIVE) < 0) {
         PauseAfterFailureLocked();
         continue;
       }
@@ -467,7 +435,7 @@ void PcmPlayer::ThreadMainLoop() {
 
 // Runs on the caller's thread with the reply to the outstanding request, or
 // nullptr if it failed
-void PcmPlayer::OnSamples(ByteVectorPtr samples) {
+void PcmPlayer::OnSamples(SampleVectorPtr samples) {
   if (!mainloop_) {
     return;
   }
@@ -476,11 +444,11 @@ void PcmPlayer::OnSamples(ByteVectorPtr samples) {
   if (request_pending_) {
     request_pending_ = false;
     // Only whole frames, and no more than requested
-    const size_t frame_size = pa_frame_size(&sample_spec_);
+    const size_t channels = sample_spec_.channels;
     if (samples) {
-      const size_t bytes =
-          std::min(samples->size(), requested_frames_ * frame_size);
-      samples->resize(bytes - bytes % frame_size);
+      const size_t count =
+          std::min(samples->size(), requested_frames_ * channels);
+      samples->resize(count - count % channels);
     }
     if (play_state_ != kPlaying) {
       // Dropped, see the class comment

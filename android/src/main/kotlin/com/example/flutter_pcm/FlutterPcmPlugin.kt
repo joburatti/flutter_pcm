@@ -49,7 +49,6 @@ class FlutterPcmPlugin : FlutterPlugin, MethodCallHandler {
                     mapOf(
                         "frequency" to format.frequency,
                         "channels" to format.channels,
-                        "sampleFormat" to format.sampleFormat.name,
                     )
                 )
             }
@@ -84,7 +83,8 @@ class FlutterPcmPlugin : FlutterPlugin, MethodCallHandler {
             val channel = channel ?: return@post
             channel.invokeMethod("getSamples", maxFrames, object : Result {
                 override fun success(result: Any?) {
-                    player?.onSamples(result as? ByteArray)
+                    // Anything but a Float32List counts as an empty reply
+                    player?.onSamples(result as? FloatArray)
                 }
 
                 override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {

@@ -11,6 +11,10 @@
 #include <mmdeviceapi.h>
 #include <windows.h>
 
+// ksmedia.h requires ks.h first
+#include <ks.h>
+#include <ksmedia.h>
+
 using namespace std::chrono_literals;
 
 const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
@@ -138,46 +142,34 @@ public:
   }
 };
 
-uint32_t GetFormatTag(const WAVEFORMATEX *wfx) {
-  if (wfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-    if (wfx->cbSize < (sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)))
-      return 0;
-
-    static const GUID s_wfexBase = {0x00000000, 0x0000, 0x0010, 0x80,
-                                    0x00,       0x00,   0xAA,   0x00,
-                                    0x38,       0x9B,   0x71};
-
-    auto wfex = reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(wfx);
-    if (memcmp(reinterpret_cast<const BYTE *>(&wfex->SubFormat) + sizeof(DWORD),
-               reinterpret_cast<const BYTE *>(&s_wfexBase) + sizeof(DWORD),
-               sizeof(GUID) - sizeof(DWORD)) != 0) {
-      return 0;
-    }
-
-    return wfex->SubFormat.Data1;
-  } else {
-    return wfx->wFormatTag;
-  }
-}
-
-SampleFormat get_sample_format(const uint32_t format_tag,
-                               const uint32_t bits_per_sample) {
-  switch (format_tag) {
-  case WAVE_FORMAT_PCM:
-    switch (bits_per_sample) {
-    case 8:
-      return uint8;
-    case 16:
-      return uint16;
-    case 32:
-      return uint32;
-    }
-    break;
-  case WAVE_FORMAT_IEEE_FLOAT:
-    return float32;
+// Our stream format: float32 at the mix format's rate and channel count, with
+// its channel mask. The mix format may use another sample type (16- or 24-bit
+// integer, or float64), which Windows converts to thanks to
+// AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM.
+std::vector<uint8_t> FloatFormat(const WAVEFORMATEX *mix) {
+  WAVEFORMATEXTENSIBLE f = {};
+  f.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+  f.Format.nChannels = mix->nChannels;
+  f.Format.nSamplesPerSec = mix->nSamplesPerSec;
+  f.Format.wBitsPerSample = 32;
+  f.Format.nBlockAlign = static_cast<WORD>(mix->nChannels * sizeof(float));
+  f.Format.nAvgBytesPerSec = f.Format.nSamplesPerSec * f.Format.nBlockAlign;
+  f.Format.cbSize =
+      static_cast<WORD>(sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX));
+  f.Samples.wValidBitsPerSample = 32;
+  f.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+  if (mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+      mix->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+    f.dwChannelMask =
+        reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(mix)->dwChannelMask;
+  } else if (mix->nChannels == 1) {
+    f.dwChannelMask = KSAUDIO_SPEAKER_MONO;
+  } else if (mix->nChannels == 2) {
+    f.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
   }
 
-  return unknown;
+  auto bytes = reinterpret_cast<const uint8_t *>(&f);
+  return {bytes, bytes + sizeof(f)};
 }
 
 struct ComRelease {
@@ -195,7 +187,7 @@ struct PcmPlayer::Device {
   ComPtr<ISimpleAudioVolume> audio_volume;
   uint32_t buffer_frame_count = 0;
   uint32_t sample_rate = 0;
-  uint32_t frame_size = 0;
+  uint32_t channels = 0;
   // Whether the stream is running. It is stopped while paused.
   bool started = false;
 
@@ -253,7 +245,7 @@ SetupResult PcmPlayer::Setup() {
   set_up_ = result.has_value();
   if (set_up_) {
     auto pwfx = reinterpret_cast<const WAVEFORMATEX *>(wave_format_.data());
-    frame_size_ = pwfx->nBlockAlign;
+    channels_ = pwfx->nChannels;
   }
   return result;
 }
@@ -402,32 +394,24 @@ SetupResult PcmPlayer::OpenDevice(Device &device) {
                           std::out_ptr(device.audio_client));
   CHECK_RESULT_SETUP("Activate AudioClient");
 
-  // Use the device's mix format, unless reopening: Dart keeps producing the
-  // format reported by Setup, which the new device may not share
+  // Use the device's mix rate and channel count, unless reopening: Dart keeps
+  // producing the format reported by Setup, which the new device may not share
   std::vector<uint8_t> wave_format = wave_format_;
   if (!reopening) {
     auto mix_format = std::unique_ptr<WAVEFORMATEX, decltype(&CoTaskMemFree)>(
         nullptr, CoTaskMemFree);
     hr = device.audio_client->GetMixFormat(std::out_ptr(mix_format));
     CHECK_RESULT_SETUP("GetMixFormat");
-
-    auto bytes = reinterpret_cast<const uint8_t *>(mix_format.get());
-    wave_format.assign(bytes,
-                       bytes + sizeof(WAVEFORMATEX) + mix_format->cbSize);
+    wave_format = FloatFormat(mix_format.get());
   }
   auto pwfx = reinterpret_cast<const WAVEFORMATEX *>(wave_format.data());
-
-  const auto format_tag = GetFormatTag(pwfx);
-  const auto format = get_sample_format(format_tag, pwfx->wBitsPerSample);
-  if (format == unknown) {
-    return std::unexpected(std::format("Unknown format tag {}", format_tag));
-  }
 
   // The requested period here will be the minimum buffer length the driver
   // uses. If we request too short a buffer, the driver will make it longer.
   // We fill half of this buffer at a time. Go with 100ms for now.
-  // Windows converts the format if it isn't the mix format, which can
-  // happen when reopening.
+  // Windows converts the format if it isn't the mix format: always for the
+  // sample type unless the mix format is float32, and for the rate and
+  // channels when reopening on another device.
   hr = device.audio_client->Initialize(
       AUDCLNT_SHAREMODE_SHARED,
       AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
@@ -467,8 +451,8 @@ SetupResult PcmPlayer::OpenDevice(Device &device) {
 
   // ThreadMainLoop starts the stream when playing
   device.sample_rate = pwfx->nSamplesPerSec;
-  device.frame_size = pwfx->nBlockAlign;
-  const AudioFormat audio_format{pwfx->nSamplesPerSec, pwfx->nChannels, format};
+  device.channels = pwfx->nChannels;
+  const AudioFormat audio_format{pwfx->nSamplesPerSec, pwfx->nChannels};
   if (!reopening) {
     wave_format_ = std::move(wave_format);
   }
@@ -516,13 +500,14 @@ bool PcmPlayer::ThreadMainLoop(Device &device) {
     // reopened device may have a smaller buffer; the rest is dropped then.
     const uint32_t frame_count = (uint32_t)std::min<size_t>(
         buffer_frame_count - num_frames_padding,
-        samples_->size() / device.frame_size);
+        samples_->size() / device.channels);
 
     uint8_t *buffer;
     hr = device.render_client->GetBuffer(frame_count, &buffer);
     CHECK_RESULT_MAIN_LOOP("GetBuffer");
 
-    std::copy_n(samples_->data(), frame_count * device.frame_size, buffer);
+    std::copy_n(samples_->data(), (size_t)frame_count * device.channels,
+                reinterpret_cast<float *>(buffer));
 
     hr = device.render_client->ReleaseBuffer(frame_count, 0);
     CHECK_RESULT_MAIN_LOOP("ReleaseBuffer");
@@ -564,7 +549,7 @@ bool PcmPlayer::ThreadMainLoop(Device &device) {
 
 // Runs on the platform thread with the reply to the outstanding request, or
 // nullptr if it failed
-void PcmPlayer::OnSamples(ByteVectorPtr samples) {
+void PcmPlayer::OnSamples(SampleVectorPtr samples) {
   const std::lock_guard<std::mutex> lock(mutex_);
   if (!request_pending_) {
     return;
@@ -573,9 +558,9 @@ void PcmPlayer::OnSamples(ByteVectorPtr samples) {
 
   // Only whole frames, and no more than requested
   if (samples) {
-    const size_t bytes = std::min<size_t>(
-        samples->size(), (size_t)requested_frames_ * frame_size_);
-    samples->resize(bytes - bytes % frame_size_);
+    const size_t count = std::min<size_t>(
+        samples->size(), (size_t)requested_frames_ * channels_);
+    samples->resize(count - count % channels_);
   }
   if (play_state_ != kPlaying) {
     // Dropped, see the class comment
