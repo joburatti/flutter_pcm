@@ -111,7 +111,7 @@ Native → Dart calls (handled in `_channelMethodCallHandler`):
   - If a track write fails (for example `ERROR_DEAD_OBJECT`), playback pauses, `onPlayingChanged(false)` is sent and the track is dropped. The next `setPlaying(true)` rebuilds it with the format reported by `setup()`.
   - `release()` (from `onDetachedFromEngine`) sets the exiting state and joins the thread.
 
-### Darwin: `darwin/Classes/`
+### Darwin: `darwin/flutter_pcm/Sources/flutter_pcm/`
 - `FlutterPcmPlugin.swift` handles the method channel. Everything runs on the main thread, so no thread hopping is needed for channel calls.
 - `PcmPlayer.swift` owns an output `AUAudioUnit`: `DefaultOutput` on macOS (follows the default device by itself), `RemoteIO` on iOS (with an `AVAudioSession` in the playback category, activated on play and deactivated on every pause except an interruption, which the system has already deactivated).
   - The format is fixed at float32 **interleaved** stereo at the hardware rate, set on `inputBusses[0]`; the unit converts. On iOS, `setup` reads the rate after briefly activating the session with `.mixWithOthers` (an inactive session may report a stale rate, and a mixable one doesn't interrupt other apps), and `maximumFramesToRender` is 4096 (screen locked). A failed `setup` leaves the player not set up, so it can be retried.
@@ -122,7 +122,7 @@ Native → Dart calls (handled in `_channelMethodCallHandler`):
 
 There is no Swift toolchain on this machine; CI builds and tests both macOS and iOS.
 
-The podspec links `AVFoundation`, `AudioToolbox` and `Accelerate`, with deployment targets iOS 15 and macOS 12 (so no `Synchronization.Atomic`).
+The plugin supports both Swift Package Manager (`darwin/flutter_pcm/Package.swift`, which Flutter finds at `darwin/<plugin name>/`) and CocoaPods (`darwin/flutter_pcm.podspec`, whose `source_files` point into the package's `Sources/flutter_pcm/`). Both link `AVFoundation`, `AudioToolbox` and `Accelerate`, with deployment targets iOS 15 and macOS 12 (so no `Synchronization.Atomic`); keep them in sync. New Swift files go in `darwin/flutter_pcm/Sources/flutter_pcm/`.
 
 ## Known issues / gotchas
 - There is no `teardown` in the Dart API. Native players are torn down only when the plugin is destroyed.
