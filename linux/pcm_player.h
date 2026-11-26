@@ -42,9 +42,9 @@ using SetupResult = std::expected<AudioFormat, std::string>;
 //
 // At most one getSamples request is outstanding. The audio thread doesn't
 // block on it: the reply is handed over through OnSamples, and is played
-// however late it comes. A reply that arrives while paused may be dropped:
-// pausing is a glitch anyway, and this way a reply always fits the space
-// that was free when it was requested, since nothing is written meanwhile.
+// however late it comes, also when it arrives while paused. Nothing is
+// written between the request and its reply, so the reply always fits the
+// space that was free when it was requested.
 //
 // If the stream fails (e.g. the server restarted), the audio thread drops the
 // context and stream, pauses playback and reports the pause through

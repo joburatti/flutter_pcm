@@ -17,6 +17,11 @@
 
 using namespace std::chrono_literals;
 
+namespace {
+// How long to wait before asking again after an empty or failed reply
+constexpr auto kRetryDelay = 10ms;
+} // namespace
+
 const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
 const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
 const IID IID_IAudioClient = __uuidof(IAudioClient);
@@ -535,8 +540,7 @@ bool PcmPlayer::ThreadMainLoop(Device &device) {
   if (delay_request_) {
     // The last reply had nothing usable. Don't hammer the Dart side.
     delay_request_ = false;
-    cv_.wait_for(lock,
-                 1000ms * buffer_frame_count / 2 / device.sample_rate);
+    cv_.wait_for(lock, kRetryDelay);
     return true;
   }
 
@@ -562,9 +566,7 @@ void PcmPlayer::OnSamples(SampleVectorPtr samples) {
         samples->size(), (size_t)requested_frames_ * channels_);
     samples->resize(count - count % channels_);
   }
-  if (play_state_ != kPlaying) {
-    // Dropped, see the class comment
-  } else if (samples && !samples->empty()) {
+  if (samples && !samples->empty()) {
     samples_ = std::move(samples);
   } else {
     delay_request_ = true;

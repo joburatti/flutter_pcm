@@ -23,6 +23,10 @@ class SilentSource {
   /// [reply] goes back to [Reply.full]
   var oddRepliesLeft = 0;
 
+  /// When each [Reply.empty] or [Reply.throwing] reply was made
+  final oddReplyTimes = <Duration>[];
+  final _clock = Stopwatch()..start();
+
   /// Blocks the isolate before the next reply, like a long frame or a
   /// breakpoint would
   var stallNextReply = false;
@@ -37,6 +41,7 @@ class SilentSource {
     switch (reply) {
       case Reply.empty || Reply.throwing:
         final throwing = reply == Reply.throwing;
+        oddReplyTimes.add(_clock.elapsed);
         if (--oddRepliesLeft <= 0) {
           reply = Reply.full;
         }
@@ -209,12 +214,22 @@ class Playback {
     source.reply = Reply.full;
 
     // Empty replies and a throwing callback play nothing. They are asked
-    // again after a short delay, and playback goes on.
+    // again after about 10 ms (a timer tick, about 16 ms, on Windows), and
+    // playback goes on.
     for (final reply in [Reply.empty, Reply.throwing]) {
-      source.oddRepliesLeft = 3;
+      const count = 10;
+      source.oddReplyTimes.clear();
+      source.oddRepliesLeft = count;
       source.reply = reply;
-      await Future.delayed(const Duration(milliseconds: 500));
+      await Future.delayed(const Duration(milliseconds: 600));
       expect(source.oddRepliesLeft, 0, reason: '$reply');
+      final times = source.oddReplyTimes;
+      final meanGap = (times.last - times.first) ~/ (count - 1);
+      expect(
+        meanGap.inMicroseconds,
+        inInclusiveRange(5000, 35000),
+        reason: '$reply: mean retry gap $meanGap',
+      );
       final from = source.framesRequested;
       await Future.delayed(const Duration(milliseconds: 500));
       expect(source.framesRequested, greaterThan(from), reason: '$reply');
