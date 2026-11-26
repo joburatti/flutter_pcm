@@ -47,6 +47,8 @@ final class PcmPlayer {
 
     private var playState = PlayState.paused
     private var requestPending = false
+    // Asks again after an empty or failed reply
+    private var retryTimer: DispatchSourceTimer?
     private var gain: Float = 1
 
     #if os(iOS)
@@ -155,6 +157,8 @@ final class PcmPlayer {
         audioUnit = nil
         signal?.cancel()
         signal = nil
+        retryTimer?.cancel()
+        retryTimer = nil
     }
 
     private func makeAudioUnit() throws -> AUAudioUnit {
@@ -295,12 +299,25 @@ final class PcmPlayer {
             requestPending = false
             return
         }
-        // An empty or failed reply: ask again after a while
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(10)) {
-            [weak self] in
-            self?.requestPending = false
-            self?.requestSamples()
+        // An empty or failed reply: ask again after 10 ms. The timer is
+        // strict, because with the default leeway macOS stretches it to tens
+        // of milliseconds while the app is in the background.
+        let timer = DispatchSource.makeTimerSource(flags: .strict, queue: .main)
+        timer.schedule(
+            deadline: .now() + .milliseconds(10),
+            leeway: .milliseconds(1)
+        )
+        timer.setEventHandler { [weak self] in
+            guard let self else {
+                return
+            }
+            self.retryTimer?.cancel()
+            self.retryTimer = nil
+            self.requestPending = false
+            self.requestSamples()
         }
+        retryTimer = timer
+        timer.activate()
     }
 
     #if os(iOS)
