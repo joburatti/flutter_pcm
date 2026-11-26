@@ -97,7 +97,11 @@ jobs:
 
       - name: Integration test
         working-directory: example
-        run: xvfb-run -a flutter test integration_test/linux_playback_test.dart -d linux
+        # One file per command: on desktop, flutter test can't launch the
+        # app for a second file
+        run: |
+          xvfb-run -a flutter test integration_test/linux_playback_test.dart -d linux
+          xvfb-run -a flutter test integration_test/play_before_setup_test.dart -d linux
 
       - name: PipeWire logs
         if: failure()
@@ -143,7 +147,9 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
           disable-animations: true
           working-directory: example
-          script: flutter test integration_test/android_playback_test.dart -d emulator-5554
+          script: |
+            flutter test integration_test/android_playback_test.dart -d emulator-5554
+            flutter test integration_test/play_before_setup_test.dart -d emulator-5554
 
   windows:
     runs-on: windows-2025
@@ -170,7 +176,10 @@ jobs:
 
       - name: Integration test
         working-directory: example
-        run: flutter test integration_test/windows_playback_test.dart -d windows
+        run: |
+          flutter test integration_test/windows_playback_test.dart -d windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          flutter test integration_test/play_before_setup_test.dart -d windows
 
   # The example has no macos/ or ios/ runner checked in; generate them.
   darwin:
@@ -198,7 +207,9 @@ jobs:
 
       - name: macOS integration test
         working-directory: example
-        run: flutter test integration_test/darwin_playback_test.dart -d macos
+        run: |
+          flutter test integration_test/darwin_playback_test.dart -d macos
+          flutter test integration_test/play_before_setup_test.dart -d macos
 
       - name: Build iOS
         working-directory: example
@@ -230,16 +241,20 @@ jobs:
           # survives exec), and before the second, kill what the first left
           # behind and erase and reboot the simulator. The expanded reporter
           # prints progress as it goes, so a hang shows whether the test had
-          # started.
-          for attempt in 1 2; do
-            if [ "$attempt" -gt 1 ]; then
-              pkill -f "simctl.*$udid" || true
-              xcrun simctl shutdown "$udid" || true
-              xcrun simctl erase "$udid"
-              xcrun simctl bootstatus "$udid" -b
-            fi
-            perl -e 'alarm shift; exec @ARGV' 600 \
-              flutter test -r expanded integration_test/darwin_playback_test.dart -d "$udid" && exit 0
-            echo "Attempt $attempt failed"
-          done
-          exit 1
+          # started. Each test file gets its own attempts.
+          run_test() {
+            for attempt in 1 2; do
+              if [ "$attempt" -gt 1 ]; then
+                pkill -f "simctl.*$udid" || true
+                xcrun simctl shutdown "$udid" || true
+                xcrun simctl erase "$udid"
+                xcrun simctl bootstatus "$udid" -b
+              fi
+              perl -e 'alarm shift; exec @ARGV' 600 \
+                flutter test -r expanded "$1" -d "$udid" && return 0
+              echo "Attempt $attempt at $1 failed"
+            done
+            return 1
+          }
+          run_test integration_test/darwin_playback_test.dart
+          run_test integration_test/play_before_setup_test.dart
