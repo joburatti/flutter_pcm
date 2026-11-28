@@ -19,10 +19,10 @@ class MainActivity : FlutterActivity() {
                 @Suppress("DEPRECATION")
                 when (call.method) {
                     "request" -> {
-                        val hint = if (call.arguments == true) {
-                            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-                        } else {
-                            AudioManager.AUDIOFOCUS_GAIN
+                        val hint = when (call.arguments) {
+                            "transient" -> AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                            "duck" -> AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+                            else -> AudioManager.AUDIOFOCUS_GAIN
                         }
                         val granted = audioManager.requestAudioFocus(
                             focusListener, AudioManager.STREAM_MUSIC, hint,

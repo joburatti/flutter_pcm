@@ -36,8 +36,10 @@ void main() {
     await playback.expectOddRepliesHandled();
 
     const focus = MethodChannel('flutter_pcm_example/focus');
-    Future<void> takeFocus({required bool transient}) async {
-      expect(await focus.invokeMethod<bool>('request', transient), isTrue);
+    // Takes focus as `gain` (permanently), `transient` or `duck` (transient,
+    // letting others duck)
+    Future<void> takeFocus(String kind) async {
+      expect(await focus.invokeMethod<bool>('request', kind), isTrue);
       await Future.delayed(const Duration(milliseconds: 300));
     }
 
@@ -46,9 +48,21 @@ void main() {
       await Future.delayed(const Duration(milliseconds: 300));
     }
 
+    // A transient loss that lets us duck (like a notification) keeps playing.
+    // Since Android 8 the system lowers our volume; before, the player does.
+    // Neither changes the volume the app set.
+    await takeFocus('duck');
+    final duckedFrom = source.framesRequested;
+    await Future.delayed(const Duration(milliseconds: 300));
+    expect(source.framesRequested, greaterThan(duckedFrom));
+    expect(await FlutterPcm.getVolume(), closeTo(0.5, 0.001));
+    await returnFocus();
+    expect(await FlutterPcm.getVolume(), closeTo(0.5, 0.001));
+    expect(playingChanges, isEmpty);
+
     // A transient focus loss (like a phone call) pauses, and regaining focus
     // resumes. Both are reported.
-    await takeFocus(transient: true);
+    await takeFocus('transient');
     expect(playingChanges, [false]);
     await playback.expectNoPulling();
     final resumedFrom = source.framesRequested;
@@ -58,7 +72,7 @@ void main() {
     expect(source.framesRequested, greaterThan(resumedFrom));
 
     // Pausing while waiting for focus cancels the resume
-    await takeFocus(transient: true);
+    await takeFocus('transient');
     expect(playingChanges, [false, true, false]);
     await FlutterPcm.setPlaying(false);
     await returnFocus();
@@ -68,7 +82,7 @@ void main() {
     // A permanent loss pauses until the app plays again
     await FlutterPcm.setPlaying(true);
     await Future.delayed(const Duration(milliseconds: 300));
-    await takeFocus(transient: false);
+    await takeFocus('gain');
     expect(playingChanges, [false, true, false, false]);
     await returnFocus();
     expect(playingChanges, [false, true, false, false]);

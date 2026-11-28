@@ -107,9 +107,16 @@ jobs:
         if: failure()
         run: journalctl --user -n 100 --no-pager -u pipewire -u pipewire-pulse -u wireplumber || true
 
+  # API 24 is the plugin's minSdk, which also runs the code paths for before
+  # Android 8 (the deprecated focus API, and the player ducking itself)
   android:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [24, 35]
+    name: android (API ${{ matrix.api-level }})
     steps:
       - uses: actions/checkout@v4
 
@@ -141,7 +148,7 @@ jobs:
       - name: Integration test
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: ${{ matrix.api-level }}
           target: google_apis
           arch: x86_64
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none

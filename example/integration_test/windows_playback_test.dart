@@ -4,8 +4,9 @@
 //
 // Run with: flutter test integration_test/windows_playback_test.dart -d windows
 //
-// Device failure (unplugging the endpoint) is not covered; see CLAUDE.md for
-// checking it by hand.
+// To check device failure, it disables the default render endpoint for a
+// moment (with Disable-PnpDevice, which needs admin rights), which interrupts
+// any other audio.
 
 import 'dart:io';
 
@@ -16,12 +17,13 @@ import 'package:flutter_pcm/flutter_pcm.dart';
 
 import 'common.dart';
 
-/// Prints the master volume of the given process' audio session on the
-/// default render endpoint, after setting it if a volume is given, and then
-/// the session's state (0 inactive, 1 active). Setting the volume this way is
-/// what the Volume Mixer does.
-const _sessionVolumeScript = r'''
-param([int]$ProcessId, [string]$Volume)
+/// With `session`, prints the master volume of the given process' audio
+/// session on the default render endpoint, after setting it if a volume is
+/// given, and then the session's state (0 inactive, 1 active). Setting the
+/// volume this way is what the Volume Mixer does. With `endpoint`, prints the
+/// default render endpoint's id.
+const _audioScript = r'''
+param([string]$Command, [int]$ProcessId, [string]$Volume)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @"
 using System;
@@ -43,6 +45,8 @@ interface IMMDeviceEnumerator {
 interface IMMDevice {
   int Activate(ref Guid iid, int clsCtx, IntPtr activationParams,
                [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+  int OpenPropertyStore(int access, out IntPtr properties);
+  int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
 }
 
 [ComImport, Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"),
@@ -86,13 +90,36 @@ interface ISimpleAudioVolume {
   int GetMasterVolume(out float level);
 }
 
-public static class SessionVolume {
-  public static string Run(int processId, string volume) {
+public static class Audio {
+  // Null if there is none
+  static IMMDevice DefaultEndpoint() {
     var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
     IMMDevice device;
-    Marshal.ThrowExceptionForHR(
-        enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */,
-                                           out device));
+    var hr = enumerator.GetDefaultAudioEndpoint(0 /* eRender */,
+                                                1 /* eMultimedia */, out device);
+    if (hr == unchecked((int)0x80070490) /* E_NOTFOUND */) {
+      return null;
+    }
+    Marshal.ThrowExceptionForHR(hr);
+    return device;
+  }
+
+  // Empty if there is none
+  public static string EndpointId() {
+    var device = DefaultEndpoint();
+    if (device == null) {
+      return "";
+    }
+    string id;
+    Marshal.ThrowExceptionForHR(device.GetId(out id));
+    return id;
+  }
+
+  public static string Session(int processId, string volume) {
+    var device = DefaultEndpoint();
+    if (device == null) {
+      throw new Exception("No default render endpoint");
+    }
     var iid = typeof(IAudioSessionManager2).GUID;
     object manager;
     Marshal.ThrowExceptionForHR(
@@ -126,27 +153,39 @@ public static class SessionVolume {
   }
 }
 "@
-[SessionVolume]::Run($ProcessId, $Volume)
+switch ($Command) {
+  'session' { [Audio]::Session($ProcessId, $Volume) }
+  'endpoint' { [Audio]::EndpointId() }
+}
 ''';
 
-/// Our session's volume and whether it is active, as the Volume Mixer sees
-/// them, after setting the volume from the outside if [set] is given.
-Future<({double volume, bool active})> session([double? set]) async {
-  final script = File(
-    '${Directory.systemTemp.path}\\flutter_pcm_session_volume.ps1',
-  );
-  await script.writeAsString(_sessionVolumeScript);
+/// Runs PowerShell [arguments] and returns what it printed
+Future<String> powershell(List<String> arguments) async {
   final res = await Process.run('powershell', [
     '-NoProfile',
     '-ExecutionPolicy',
     'Bypass',
-    '-File',
-    script.path,
-    '$pid',
-    if (set != null) '$set',
+    ...arguments,
   ]);
   expect(res.exitCode, 0, reason: '${res.stdout}${res.stderr}');
-  final [volume, state] = (res.stdout as String).trim().split(' ');
+  return (res.stdout as String).trim();
+}
+
+/// Runs [_audioScript] with [arguments]
+Future<String> audioScript(List<String> arguments) async {
+  final script = File('${Directory.systemTemp.path}\\flutter_pcm_audio.ps1');
+  await script.writeAsString(_audioScript);
+  return powershell(['-File', script.path, ...arguments]);
+}
+
+/// Our session's volume and whether it is active, as the Volume Mixer sees
+/// them, after setting the volume from the outside if [set] is given.
+Future<({double volume, bool active})> session([double? set]) async {
+  final [volume, state] = (await audioScript([
+    'session',
+    '$pid',
+    if (set != null) '$set',
+  ])).split(' ');
   return (volume: double.parse(volume), active: state == '1');
 }
 
@@ -155,12 +194,30 @@ Future<double> sessionVolume([double? set]) async =>
 
 Future<bool> sessionActive() async => (await session()).active;
 
+/// The default render endpoint's id, like `{0.0.0.00000000}.{<guid>}`, or an
+/// empty string if there is none
+Future<String> defaultEndpoint() => audioScript(['endpoint', '0']);
+
+/// Enables or disables an endpoint, like the Sound settings do. Its device
+/// instance id is its endpoint id under `SWD\MMDEVAPI`.
+Future<void> setEndpointEnabled(String endpoint, bool enabled) async {
+  final cmdlet = enabled ? 'Enable-PnpDevice' : 'Disable-PnpDevice';
+  await powershell([
+    '-Command',
+    "$cmdlet -InstanceId 'SWD\\MMDEVAPI\\$endpoint' -Confirm:\$false",
+  ]);
+}
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('playback, pause and volume', (WidgetTester tester) async {
+  testWidgets('playback, pause, volume and device failure', (
+    WidgetTester tester,
+  ) async {
     final playback = Playback();
+    final source = playback.source;
     final externalVolumes = playback.externalVolumes;
+    final playingChanges = playback.playingChanges;
 
     await playback.setup();
 
@@ -192,6 +249,44 @@ void main() {
     expect(await sessionActive(), isTrue);
 
     await playback.expectOddRepliesHandled();
+
+    // Disabling the device pauses playback and reports it
+    final endpoint = await defaultEndpoint();
+    await setEndpointEnabled(endpoint, false);
+    try {
+      await Future.delayed(const Duration(milliseconds: 500));
+      expect(playingChanges, [false]);
+      final failedFrames = source.framesRequested;
+      await Future.delayed(const Duration(milliseconds: 500));
+      expect(source.framesRequested, failedFrames);
+
+      // Playing without a device is refused and reported
+      await FlutterPcm.setPlaying(true);
+      await Future.delayed(const Duration(milliseconds: 300));
+      expect(playingChanges, [false, false]);
+      expect(source.framesRequested, failedFrames);
+
+      // A volume set without a device is kept
+      await FlutterPcm.setVolume(0.6);
+      expect(await FlutterPcm.getVolume(), closeTo(0.6, 0.001));
+    } finally {
+      await setEndpointEnabled(endpoint, true);
+    }
+
+    // Wait for the endpoint to be the default again
+    for (var i = 0; i < 50 && await defaultEndpoint() != endpoint; i++) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    expect(await defaultEndpoint(), endpoint);
+
+    // Playing again reopens the device at the rate reported by setup, and
+    // applies the volume set meanwhile, without reporting either back
+    await FlutterPcm.setPlaying(true);
+    await playback.expectNormalRate();
+    expect(playingChanges, [false, false]);
+    expect(await sessionActive(), isTrue);
+    expect(await sessionVolume(), closeTo(0.6, 0.001));
+    expect(externalVolumes.length, 1);
 
     await FlutterPcm.setPlaying(false);
   });
