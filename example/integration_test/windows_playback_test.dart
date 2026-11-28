@@ -4,9 +4,8 @@
 //
 // Run with: flutter test integration_test/windows_playback_test.dart -d windows
 //
-// To check device failure, it disables the default render endpoint for a
-// moment (with Disable-PnpDevice, which needs admin rights), which interrupts
-// any other audio.
+// To check device failure, it stops the Windows Audio service for a moment
+// (which needs admin rights), interrupting any other audio.
 
 import 'dart:io';
 
@@ -20,8 +19,8 @@ import 'common.dart';
 /// With `session`, prints the master volume of the given process' audio
 /// session on the default render endpoint, after setting it if a volume is
 /// given, and then the session's state (0 inactive, 1 active). Setting the
-/// volume this way is what the Volume Mixer does. With `endpoint`, prints the
-/// default render endpoint's id.
+/// volume this way is what the Volume Mixer does. With `endpoint`, prints 1 if
+/// there is a default render endpoint and 0 if not.
 const _audioScript = r'''
 param([string]$Command, [int]$ProcessId, [string]$Volume)
 $ErrorActionPreference = 'Stop'
@@ -45,8 +44,6 @@ interface IMMDeviceEnumerator {
 interface IMMDevice {
   int Activate(ref Guid iid, int clsCtx, IntPtr activationParams,
                [MarshalAs(UnmanagedType.IUnknown)] out object iface);
-  int OpenPropertyStore(int access, out IntPtr properties);
-  int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
 }
 
 [ComImport, Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"),
@@ -91,28 +88,17 @@ interface ISimpleAudioVolume {
 }
 
 public static class Audio {
-  // Null if there is none
+  // Null if there is none, also while the audio service is starting
   static IMMDevice DefaultEndpoint() {
     var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
     IMMDevice device;
     var hr = enumerator.GetDefaultAudioEndpoint(0 /* eRender */,
                                                 1 /* eMultimedia */, out device);
-    if (hr == unchecked((int)0x80070490) /* E_NOTFOUND */) {
-      return null;
-    }
-    Marshal.ThrowExceptionForHR(hr);
-    return device;
+    return hr < 0 ? null : device;
   }
 
-  // Empty if there is none
-  public static string EndpointId() {
-    var device = DefaultEndpoint();
-    if (device == null) {
-      return "";
-    }
-    string id;
-    Marshal.ThrowExceptionForHR(device.GetId(out id));
-    return id;
+  public static string HasEndpoint() {
+    return DefaultEndpoint() != null ? "1" : "0";
   }
 
   public static string Session(int processId, string volume) {
@@ -155,11 +141,13 @@ public static class Audio {
 "@
 switch ($Command) {
   'session' { [Audio]::Session($ProcessId, $Volume) }
-  'endpoint' { [Audio]::EndpointId() }
+  'endpoint' { [Audio]::HasEndpoint() }
 }
 ''';
 
-/// Runs PowerShell [arguments] and returns what it printed
+/// Runs PowerShell [arguments] and returns what it printed. A command passed
+/// with `-Command` should set `$ErrorActionPreference = 'Stop'`, or a failing
+/// cmdlet still exits with 0.
 Future<String> powershell(List<String> arguments) async {
   final res = await Process.run('powershell', [
     '-NoProfile',
@@ -194,24 +182,26 @@ Future<double> sessionVolume([double? set]) async =>
 
 Future<bool> sessionActive() async => (await session()).active;
 
-/// The default render endpoint's id, like `{0.0.0.00000000}.{<guid>}`, or an
-/// empty string if there is none
-Future<String> defaultEndpoint() => audioScript(['endpoint', '0']);
+/// Whether there is a default render endpoint
+Future<bool> hasDefaultEndpoint() async =>
+    await audioScript(['endpoint', '0']) == '1';
 
-/// Enables or disables an endpoint, like the Sound settings do. Its device
-/// instance id is its endpoint id under `SWD\MMDEVAPI`.
-Future<void> setEndpointEnabled(String endpoint, bool enabled) async {
-  final cmdlet = enabled ? 'Enable-PnpDevice' : 'Disable-PnpDevice';
+/// Starts or stops the Windows Audio service. Stopping it fails every stream,
+/// like removing the device does. (Disabling the device doesn't work on the
+/// CI runner: VB-CABLE refuses Disable-PnpDevice, and its endpoint stays
+/// enabled after pnputil /disable-device.)
+Future<void> setAudioServiceRunning(bool running) async {
+  final cmdlet = running ? 'Start-Service' : 'Stop-Service -Force';
   await powershell([
     '-Command',
-    "$cmdlet -InstanceId 'SWD\\MMDEVAPI\\$endpoint' -Confirm:\$false",
+    "\$ErrorActionPreference = 'Stop'; $cmdlet Audiosrv",
   ]);
 }
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('playback, pause, volume and device failure', (
+  testWidgets('playback, pause, volume and audio service restart', (
     WidgetTester tester,
   ) async {
     final playback = Playback();
@@ -250,9 +240,9 @@ void main() {
 
     await playback.expectOddRepliesHandled();
 
-    // Disabling the device pauses playback and reports it
-    final endpoint = await defaultEndpoint();
-    await setEndpointEnabled(endpoint, false);
+    // Stopping the audio service fails the stream, which pauses playback and
+    // reports it
+    await setAudioServiceRunning(false);
     try {
       await Future.delayed(const Duration(milliseconds: 500));
       expect(playingChanges, [false]);
@@ -260,24 +250,24 @@ void main() {
       await Future.delayed(const Duration(milliseconds: 500));
       expect(source.framesRequested, failedFrames);
 
-      // Playing without a device is refused and reported
+      // Playing while the service is stopped is refused and reported
       await FlutterPcm.setPlaying(true);
       await Future.delayed(const Duration(milliseconds: 300));
       expect(playingChanges, [false, false]);
       expect(source.framesRequested, failedFrames);
 
-      // A volume set without a device is kept
+      // A volume set meanwhile is kept
       await FlutterPcm.setVolume(0.6);
       expect(await FlutterPcm.getVolume(), closeTo(0.6, 0.001));
     } finally {
-      await setEndpointEnabled(endpoint, true);
+      await setAudioServiceRunning(true);
     }
 
-    // Wait for the endpoint to be the default again
-    for (var i = 0; i < 50 && await defaultEndpoint() != endpoint; i++) {
+    // Wait for the endpoint to come back
+    for (var i = 0; i < 50 && !await hasDefaultEndpoint(); i++) {
       await Future.delayed(const Duration(milliseconds: 100));
     }
-    expect(await defaultEndpoint(), endpoint);
+    expect(await hasDefaultEndpoint(), isTrue);
 
     // Playing again reopens the device at the rate reported by setup, and
     // applies the volume set meanwhile, without reporting either back

@@ -155,8 +155,8 @@ jobs:
           disable-animations: true
           working-directory: example
           script: |
-            flutter test integration_test/android_playback_test.dart -d emulator-5554
-            flutter test integration_test/play_before_setup_test.dart -d emulator-5554
+            ../.github/scripts/android_test.sh integration_test/android_playback_test.dart
+            ../.github/scripts/android_test.sh integration_test/play_before_setup_test.dart
 
   windows:
     runs-on: windows-2025
