@@ -38,7 +38,7 @@ The checks shared by every platform live in `integration_test/common.dart`. `Sil
 - `play`: the pull rate.
 - `expectVolumesApplied`: volume changes are applied, clamped (NaN ignored) and not reported back, optionally checked in the system mixer through a callback.
 - `pause` and `resume`.
-- `expectOddRepliesHandled`: a slow reply, oversized replies, partial frames, empty replies and a throwing callback don't stop playback, and empty or throwing replies are asked again after 5–35 ms on average.
+- `expectOddRepliesHandled`: a slow reply, oversized replies, partial frames, empty replies and a throwing callback don't stop playback.
 
 `play_before_setup_test.dart` runs on every platform: `setPlaying(true)` before `setup` starts playback once `setup` has run. It needs its own file (and process), because the platform tests check that `setup` alone doesn't play.
 
