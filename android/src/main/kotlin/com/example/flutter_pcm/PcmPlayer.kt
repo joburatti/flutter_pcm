@@ -39,9 +39,9 @@ typealias PlayingCallback = (playing: Boolean) -> Unit
 //
 // At most one getSamples request is outstanding. The audio thread doesn't
 // block on it: the reply is handed over through onSamples, and is played
-// however late it comes. A reply that arrives while paused may be dropped:
-// pausing is a glitch anyway, and this way a reply always fits the space
-// that was free when it was requested, since nothing is written meanwhile.
+// however late it comes, also when it arrives while paused. Nothing is
+// written between the request and its reply, so the reply always fits the
+// space that was free when it was requested.
 //
 // Playing requires audio focus. When the system takes playback away (focus
 // loss, headphones unplugged), playingCallback reports it, and again when a
@@ -373,7 +373,6 @@ class PcmPlayer(
     private fun threadMainLoop(track: AudioTrack, channels: Int) {
         val bufferFrames = track.bufferSizeInFrames
         val minRequestFrames = bufferFrames / 2
-        val minRequestMs = max(1L, minRequestFrames * 1000L / track.sampleRate)
         var framesWritten = 0L
         var underrunCount = track.underrunCount
         var refilling = false
@@ -433,7 +432,7 @@ class PcmPlayer(
                         // The last reply had nothing usable. Don't hammer
                         // the Dart side.
                         delayRequest = false
-                        stateChanged.await(minRequestMs, TimeUnit.MILLISECONDS)
+                        stateChanged.await(RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
                     }
 
                     else -> {
@@ -475,9 +474,7 @@ class PcmPlayer(
 
             // Only whole frames, and no more than requested
             val usable = reply?.let { min(it.size, requestedFrames * channels) } ?: 0
-            if (playState != PlayState.PLAYING) {
-                // Dropped, see the class comment
-            } else if (usable >= channels) {
+            if (usable >= channels) {
                 samples = reply
                 samplesCount = usable - usable % channels
             } else {
@@ -492,6 +489,8 @@ class PcmPlayer(
 
         // Target amount of buffered audio, same as on Windows and Linux
         const val TARGET_LATENCY_MS = 100
+        // How long to wait before asking again after an empty or failed reply
+        const val RETRY_DELAY_MS = 10L
 
         // Volume applied while another app holds transient focus that allows
         // ducking (before Android 8, where the system doesn't duck for us)

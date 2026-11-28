@@ -13,6 +13,9 @@ namespace {
 // half of it has been played, same as on Windows.
 constexpr pa_usec_t kTargetLatency = 100 * PA_USEC_PER_MSEC;
 
+// How long to wait before asking again after an empty or failed reply
+constexpr auto kRetryDelay = std::chrono::milliseconds(10);
+
 enum class Readiness { kPending, kReady, kFailed };
 
 Readiness readiness(pa_context *c) {
@@ -418,10 +421,8 @@ void PcmPlayer::ThreadMainLoop() {
     if (delay_request_) {
       // The last reply had nothing usable. Don't hammer the Dart side.
       delay_request_ = false;
-      const auto retry_delay = std::chrono::microseconds(
-          pa_bytes_to_usec(min_request_bytes_, &sample_spec_));
       pa_threaded_mainloop_unlock(mainloop_);
-      std::this_thread::sleep_for(retry_delay);
+      std::this_thread::sleep_for(kRetryDelay);
       pa_threaded_mainloop_lock(mainloop_);
       continue;
     }
@@ -450,9 +451,7 @@ void PcmPlayer::OnSamples(SampleVectorPtr samples) {
           std::min(samples->size(), requested_frames_ * channels);
       samples->resize(count - count % channels);
     }
-    if (play_state_ != kPlaying) {
-      // Dropped, see the class comment
-    } else if (samples && !samples->empty()) {
+    if (samples && !samples->empty()) {
       samples_ = std::move(samples);
     } else {
       delay_request_ = true;

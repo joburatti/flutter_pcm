@@ -21,6 +21,13 @@ class AudioFormat {
 /// Returning fewer frames is fine. Samples beyond [maxFrames] frames, and a
 /// trailing partial frame, are dropped.
 ///
+/// [maxFrames] changes from call to call. It can be anything from a single
+/// frame up to about 100 ms of audio, and the callback must handle any size
+/// in that range.
+///
+/// Every frame returned is played, pauses included, unless the audio device
+/// fails (see [PlayingCallback]).
+///
 /// An empty list, or a callback that throws, plays nothing: the next request
 /// comes after a short delay.
 typedef SampleCallback = Float32List Function(int maxFrames);
@@ -32,12 +39,20 @@ typedef VolumeCallback = void Function(double volume);
 /// Reports playback that the system paused or resumed on its own, and a
 /// [FlutterPcm.setPlaying] call that was refused.
 ///
-/// On every platform, playback pauses when the audio device or server fails
-/// (for example the output device was unplugged on Windows, or the sound
-/// server restarted on Linux). The next `setPlaying(true)` reopens it with
-/// the format returned by [FlutterPcm.setup], so the sample callback can
-/// keep producing that format. On Android, audio focus changes and unplugged
-/// headphones also pause, and a transient focus loss resumes by itself.
+/// Playback pauses when the audio device or server fails, for example when
+/// the output device is unplugged or disabled on Windows, the sound server
+/// restarts on Linux, or the audio server dies on Android. Audio that was
+/// buffered then is lost. The next `setPlaying(true)` reopens the device
+/// with the format returned by [FlutterPcm.setup], so the sample callback
+/// can keep producing that format. On macOS playback doesn't pause when the
+/// output device goes away: it follows the default device.
+///
+/// On Android, playback also pauses when audio focus is lost (for example to
+/// a phone call or another app) and when headphones are unplugged. On iOS it
+/// pauses for interruptions (a phone call, another app taking the audio
+/// session), when headphones are unplugged, and when the media services are
+/// reset. After a transient focus loss on Android, or an interruption on
+/// iOS, playback resumes by itself when the system allows it.
 typedef PlayingCallback = void Function(bool playing);
 
 class FlutterPcm {
@@ -101,6 +116,12 @@ class FlutterPcm {
     return await _methodChannel.invokeMethod<double>("getVolume") ?? 1;
   }
 
+  /// Starts or pauses playback.
+  ///
+  /// Pausing keeps the audio that hasn't been played yet, including a block
+  /// that was being requested; it plays when playback resumes. Calling
+  /// `setPlaying(true)` before [setup] starts playback once [setup] has run.
+  /// If the system refuses to play, the playing callback reports `false`.
   static Future<void> setPlaying(bool p) async {
     return _methodChannel.invokeMethod<void>("setPlaying", p);
   }
